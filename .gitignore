@@ -129,6 +129,8 @@ celerybeat.pid
 
 # Environments
 .env
+.env.*
+!.env.example
 .venv
 env/
 venv/
@@ -182,3 +184,25 @@ cython_debug/
 output/HydroAI_Dataset_v5.xlsx
 output/HydroAI_Dataset_v5.xlsx
 PMIS/ibtracs.WP.list.v04r01.csv
+
+# Local databases and SQLite runtime files
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Streamlit secrets must only be configured locally or in Community Cloud
+.streamlit/secrets.toml
+**/.streamlit/secrets.toml
+!**/.streamlit/secrets.toml.example
+
+# Local HydroAI API credential
+.hydroai_api_key

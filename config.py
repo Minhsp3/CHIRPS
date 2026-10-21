@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -15,7 +16,9 @@ PMIS_DIR = BASE_DIR / "PMIS"
 HYDROLOGY_DIR = BASE_DIR / "hydrology"
 OUTPUT_DIR = BASE_DIR / "output"
 MODEL_DIR = BASE_DIR / "models"
-HOCHUA_DB_PATH = PMIS_DIR / "evn_hochua_manual.db"
+HOCHUA_DB_PATH = Path(
+    os.getenv("HYDROAI_DB_PATH", str(PMIS_DIR / "evn_hochua_manual.db"))
+).expanduser()
 NSMO_WEATHER_DB_PATH = Path(r"D:\VScode\Project\LayDuLieu_NMSO\NSMO_1\nsmo_data.db")
 
 BASIN_NAMES = {
@@ -125,8 +128,8 @@ WEATHER_RAIN_KEYWORDS = [
 ]
 
 DASHBOARD_PORT = 8501
-API_HOST = "127.0.0.1"
-API_PORT = 8000
+API_HOST = os.getenv("HYDROAI_API_HOST", "127.0.0.1")
+API_PORT = int(os.getenv("HYDROAI_API_PORT", "8000"))
 
 
 def ensure_project_dirs() -> None:

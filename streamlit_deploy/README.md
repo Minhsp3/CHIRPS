@@ -1,10 +1,14 @@
 # HydroAI Streamlit
 
+Dashboard này đọc dữ liệu trực tiếp từ HydroAI API. Không cần export hoặc commit
+database SQLite lên GitHub khi dữ liệu trên máy chủ thay đổi.
+
 ## Chạy tại máy
 
 ```powershell
 cd D:\VScode\CHIRPS
-.\.venv\Scripts\python.exe streamlit_deploy\export_streamlit_data.py
+$env:HYDROAI_API_URL = "http://127.0.0.1:8000"
+$env:HYDROAI_API_KEY = "cung-khoa-voi-api-server"
 .\.venv\Scripts\streamlit.exe run streamlit_deploy\streamlit_app.py
 ```
 
@@ -14,7 +18,6 @@ cd D:\VScode\CHIRPS
 2. Trên Streamlit Community Cloud, chọn repository và đặt **Main file path** là:
    `streamlit_deploy/streamlit_app.py`.
 3. Streamlit sẽ cài các gói từ `streamlit_deploy/requirements.txt`.
+4. Cấu hình `HYDROAI_API_URL` và `HYDROAI_API_KEY` trong App settings > Secrets.
 
-Database `hydroai_streamlit.db` là bản tổng hợp theo ngày để đủ nhỏ cho GitHub. Khi
-database vận hành thay đổi, chạy lại `export_streamlit_data.py` rồi commit bản mới.
-Không đưa `PMIS/evn_hochua_manual.db` lên GitHub vì tệp này lớn hơn giới hạn thông thường.
+Xem hướng dẫn đầy đủ tại `API_DEPLOYMENT.md` ở thư mục gốc dự án.
