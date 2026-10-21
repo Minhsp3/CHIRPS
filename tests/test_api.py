@@ -64,6 +64,7 @@ def create_test_database(path: Path) -> None:
                 (1, "2026-10-15 00:00:00", "2026-10-15 00:05:00", "Buôn Tua Srah", 480, 487.5, 465, 100, 90, 0, 90),
                 (2, "2026-10-15 12:00:00", "2026-10-15 12:05:00", "Buôn Tua Srah", 482, 487.5, 465, 120, 110, 0, 110),
                 (3, "2026-10-15 12:00:00", "2026-10-15 12:05:00", "Buôn Kuốp", 411, 412, 409, 80, 75, 0, 75),
+                (4, "2026-10-15 12:00:00", "2026-10-15 12:05:00", "Trị An", 61.7, 62, 50, 700, 650, 0, 650),
             ],
         )
         connection.execute(
@@ -139,6 +140,34 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(generation.status_code, 200)
         self.assertEqual(generation.json()["actual_rows"][0]["Generation_MWh"], 1000.0)
         self.assertEqual(generation.json()["forecast_rows"][0]["Generation_Forecast_MWh"], 1100.0)
+
+    def test_all_reservoirs_are_listed_and_history_is_queryable(self) -> None:
+        basins = self.client.get("/basins", headers=self.headers)
+        self.assertEqual(basins.status_code, 200)
+        items = basins.json()["basins"]
+        tri_an = next(item for item in items if item["reservoir_name"] == "Trị An")
+        self.assertEqual(tri_an["id"], "RESERVOIR:Trị An")
+        self.assertIsNone(tri_an["model_basin_id"])
+
+        history = self.client.get(
+            "/history",
+            params={
+                "basin_id": tri_an["id"],
+                "start_date": "2026-10-15",
+                "end_date": "2026-10-15",
+            },
+            headers=self.headers,
+        )
+        self.assertEqual(history.status_code, 200)
+        self.assertEqual(history.json()["rows"][0]["Reservoir_Name"], "Trị An")
+
+        forecast = self.client.get(
+            "/forecast",
+            params={"basin_id": tri_an["id"]},
+            headers=self.headers,
+        )
+        self.assertEqual(forecast.status_code, 200)
+        self.assertEqual(forecast.json()["rows"], [])
 
     def test_database_connection_is_read_only(self) -> None:
         with closing(self.api.open_database()) as connection:

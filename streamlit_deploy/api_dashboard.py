@@ -14,7 +14,7 @@ import streamlit as st
 CACHE_TTL_SECONDS = 300
 DEFAULT_CONNECT_TIMEOUT = 5
 DEFAULT_READ_TIMEOUT = 30
-COLORS = {"actual": "#16a34a", "forecast": "#dc2626"}
+COLORS = {"actual": "#16a34a", "comparison": "#2563eb", "forecast": "#dc2626"}
 
 
 class ApiError(RuntimeError):
@@ -130,9 +130,29 @@ def metric_value(value: Any, unit: str) -> str:
     return f"{text} {unit}"
 
 
+def shift_date_years(value: date, years: int) -> date:
+    target_year = value.year + years
+    try:
+        return value.replace(year=target_year)
+    except ValueError:
+        return value.replace(year=target_year, month=2, day=28)
+
+
+def align_comparison_dates(frame: pd.DataFrame, years: int) -> pd.DataFrame:
+    if frame.empty or "Date" not in frame:
+        return frame
+    aligned = frame.copy()
+    aligned["Date"] = aligned["Date"].map(
+        lambda value: pd.Timestamp(shift_date_years(value.date(), years))
+    )
+    return aligned
+
+
 def hydro_chart(
     actual: pd.DataFrame,
     forecast: pd.DataFrame,
+    comparison: pd.DataFrame,
+    comparison_year: int | None,
     actual_column: str,
     p10_column: str,
     p50_column: str,
@@ -149,6 +169,26 @@ def hydro_chart(
                 y=alt.Y("Value:Q", title=unit, scale=alt.Scale(zero=False)),
                 tooltip=[
                     alt.Tooltip("Date:T", title="Ngày", format="%d/%m/%Y"),
+                    alt.Tooltip("Value:Q", title=unit, format=",.2f"),
+                ],
+            )
+        )
+    if not comparison.empty and actual_column in comparison:
+        comparison_history = (
+            comparison[["Date", actual_column]]
+            .dropna()
+            .rename(columns={actual_column: "Value"})
+        )
+        comparison_history["Chuỗi"] = f"Năm {comparison_year}"
+        layers.append(
+            alt.Chart(comparison_history)
+            .mark_line(color=COLORS["comparison"], strokeDash=[7, 5], strokeWidth=2)
+            .encode(
+                x=alt.X("Date:T", title="Ngày"),
+                y=alt.Y("Value:Q", title=unit, scale=alt.Scale(zero=False)),
+                tooltip=[
+                    alt.Tooltip("Date:T", title="Ngày đối chiếu", format="%d/%m"),
+                    alt.Tooltip("Chuỗi:N", title="So sánh"),
                     alt.Tooltip("Value:Q", title=unit, format=",.2f"),
                 ],
             )
@@ -177,6 +217,8 @@ def hydro_chart(
                 )
             )
     st.subheader(title)
+    if comparison_year is not None and not comparison.empty:
+        st.caption(f"Xanh lá: chuỗi đang chọn; xanh dương nét đứt: năm {comparison_year}.")
     if not layers:
         st.info("Chưa có dữ liệu trong khoảng đã chọn.")
         return
@@ -225,6 +267,7 @@ def render_dashboard(
     start_date: date,
     end_date: date,
     show_forecast: bool,
+    comparison_year: int | None,
     auto_refresh: bool,
     interval_seconds: int,
 ) -> None:
@@ -235,8 +278,23 @@ def render_dashboard(
         "end_date": end_date,
         "limit": 10_000,
     }
+    comparison_payload: dict[str, Any] = {"rows": []}
     try:
         history_payload = request_payload(api_url, api_key, "/history", params, token)
+        if comparison_year is not None:
+            comparison_offset = comparison_year - end_date.year
+            comparison_payload = request_payload(
+                api_url,
+                api_key,
+                "/history",
+                {
+                    "basin_id": basin_id,
+                    "start_date": shift_date_years(start_date, comparison_offset),
+                    "end_date": shift_date_years(end_date, comparison_offset),
+                    "limit": 10_000,
+                },
+                token,
+            )
         forecast_payload = (
             request_payload(api_url, api_key, "/forecast", params, token)
             if show_forecast
@@ -255,11 +313,19 @@ def render_dashboard(
         return
 
     history = frame_from_rows(history_payload.get("rows", []))
+    comparison = frame_from_rows(comparison_payload.get("rows", []))
+    if comparison_year is not None:
+        comparison = align_comparison_dates(comparison, end_date.year - comparison_year)
     forecast = frame_from_rows(forecast_payload.get("rows", []))
     generation = frame_from_rows(generation_payload.get("actual_rows", []))
     generation_forecast = frame_from_rows(generation_payload.get("forecast_rows", []))
 
-    if history_payload.get("truncated") or forecast_payload.get("truncated") or generation_payload.get("truncated"):
+    if (
+        history_payload.get("truncated")
+        or comparison_payload.get("truncated")
+        or forecast_payload.get("truncated")
+        or generation_payload.get("truncated")
+    ):
         st.warning("Kết quả đã chạm giới hạn 10.000 dòng. Hãy chọn khoảng ngày ngắn hơn.")
 
     if not history.empty:
@@ -274,6 +340,8 @@ def render_dashboard(
         hydro_chart(
             history,
             forecast,
+            comparison,
+            comparison_year,
             "WaterLevel_m",
             "WaterLevel_P10_m",
             "WaterLevel_P50_m",
@@ -284,6 +352,8 @@ def render_dashboard(
         hydro_chart(
             history,
             forecast,
+            comparison,
+            comparison_year,
             "Q_in_m3s",
             "Q_P10_m3s",
             "Q_P50_m3s",
@@ -295,6 +365,9 @@ def render_dashboard(
     with data_tab:
         st.subheader("Lịch sử hồ chứa")
         st.dataframe(history, width="stretch", hide_index=True)
+        if comparison_year is not None:
+            st.subheader(f"Dữ liệu so sánh năm {comparison_year}")
+            st.dataframe(comparison, width="stretch", hide_index=True)
         if show_forecast:
             st.subheader("Dự báo AI")
             st.dataframe(forecast, width="stretch", hide_index=True)
@@ -356,12 +429,15 @@ def main() -> None:
         st.warning("API chưa trả về danh sách lưu vực.")
         st.stop()
     basin_by_id = {item["id"]: item for item in basins}
+    basin_options = list(basin_by_id)
+    default_basin_index = basin_options.index("BTS") if "BTS" in basin_options else 0
 
     with st.sidebar:
         st.header("Bộ lọc")
         basin_id = st.selectbox(
             "Lưu vực",
-            options=list(basin_by_id),
+            options=basin_options,
+            index=default_basin_index,
             format_func=lambda value: basin_by_id[value].get("reservoir_name") or value,
         )
         selected = basin_by_id[basin_id]
@@ -380,7 +456,38 @@ def main() -> None:
             min_value=min_date,
             max_value=max_date,
         )
-        show_forecast = st.toggle("Hiển thị dự báo AI", value=True)
+        valid_range = isinstance(selected_range, (tuple, list)) and len(selected_range) == 2
+        reference_year = selected_range[1].year if valid_range else actual_max_date.year
+        comparison_years = [
+            year
+            for year in range(actual_max_date.year, min_date.year - 1, -1)
+            if year != reference_year
+        ]
+        compare_enabled = st.toggle(
+            "So sánh năm khác",
+            value=False,
+            disabled=not comparison_years,
+        )
+        comparison_year = (
+            st.selectbox(
+                "Năm so sánh",
+                options=comparison_years,
+                index=0,
+                disabled=not compare_enabled,
+            )
+            if comparison_years
+            else None
+        )
+        if not compare_enabled:
+            comparison_year = None
+        supports_forecast = bool(selected.get("model_basin_id"))
+        show_forecast = st.toggle(
+            "Hiển thị dự báo AI",
+            value=supports_forecast,
+            disabled=not supports_forecast,
+        )
+        if not supports_forecast:
+            st.caption("Hồ này hiện có dữ liệu lịch sử; mô hình AI chưa được huấn luyện riêng.")
         auto_refresh = st.toggle("Tự làm mới", value=False)
         interval_minutes = st.selectbox(
             "Chu kỳ tự làm mới",
@@ -411,6 +518,7 @@ def main() -> None:
             start_date,
             end_date,
             show_forecast,
+            comparison_year,
             auto_refresh,
             interval_seconds,
         )

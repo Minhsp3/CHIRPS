@@ -22,6 +22,8 @@ RESERVOIR_BY_BASIN = {
     "BK": "Buôn Kuốp",
     "SP3": "Srêpốk 3",
 }
+RESERVOIR_ID_PREFIX = "RESERVOIR:"
+RESERVOIR_DISPLAY_ALIASES = {"KHE BỐ": "Khe Bố"}
 CLEAN_NAME_SQL = (
     "TRIM(CASE "
     "WHEN INSTR(reservoir_name, 'Đồng bộ lúc:') > 0 "
@@ -62,13 +64,28 @@ def rows_as_dicts(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-def validate_basin_id(basin_id: str | None) -> str | None:
+def resolve_basin_selector(basin_id: str | None) -> tuple[str | None, str | None]:
     if basin_id is None:
-        return None
-    normalized = basin_id.strip().upper()
-    if normalized not in RESERVOIR_BY_BASIN:
-        raise ValueError(f"Lưu vực không hợp lệ: {basin_id}")
-    return normalized
+        return None, None
+    selector = basin_id.strip()
+    if not selector:
+        raise ValueError("Lưu vực không được để trống")
+    normalized = selector.upper()
+    if normalized in RESERVOIR_BY_BASIN:
+        return normalized, RESERVOIR_BY_BASIN[normalized]
+    if selector.startswith(RESERVOIR_ID_PREFIX):
+        reservoir_name = selector[len(RESERVOIR_ID_PREFIX) :].strip()
+        if reservoir_name:
+            return None, reservoir_name
+    raise ValueError(f"Lưu vực không hợp lệ: {basin_id}")
+
+
+def model_basin_for_reservoir(reservoir_name: str) -> str | None:
+    folded = reservoir_name.casefold()
+    for basin_id, known_name in RESERVOIR_BY_BASIN.items():
+        if known_name.casefold() == folded:
+            return basin_id
+    return None
 
 
 def normalize_range(
@@ -91,18 +108,10 @@ def limited_result(rows: list[sqlite3.Row], limit: int) -> tuple[list[dict[str, 
     return rows_as_dicts(rows[:limit]), truncated
 
 
-def reservoir_filter(basin_id: str | None) -> tuple[str, list[str]]:
-    selected = (
-        [RESERVOIR_BY_BASIN[basin_id]]
-        if basin_id
-        else list(RESERVOIR_BY_BASIN.values())
-    )
-    clauses: list[str] = []
-    params: list[str] = []
-    for name in selected:
-        clauses.append("(reservoir_name = ? OR reservoir_name LIKE ? OR reservoir_name LIKE ?)")
-        params.extend([name, f"{name}Đồng bộ%", f"{name} Đồng bộ%"])
-    return "(" + " OR ".join(clauses) + ")", params
+def reservoir_filter(reservoir_name: str | None) -> tuple[str, list[str]]:
+    if reservoir_name is None:
+        return "1 = 1", []
+    return f"{CLEAN_NAME_SQL} = ? COLLATE NOCASE", [reservoir_name]
 
 
 def basin_case_sql() -> str:
@@ -127,9 +136,9 @@ def query_history(
     end_date: date | None,
     limit: int,
 ) -> dict[str, Any]:
-    basin_id = validate_basin_id(basin_id)
+    model_basin_id, reservoir_name = resolve_basin_selector(basin_id)
     start, end = normalize_range(start_date, end_date, latest_history_date(connection))
-    filter_sql, filter_params = reservoir_filter(basin_id)
+    filter_sql, filter_params = reservoir_filter(reservoir_name)
     end_exclusive = end + timedelta(days=1)
     sql = f"""
         WITH ranked AS (
@@ -138,7 +147,7 @@ def query_history(
                 observed_at,
                 requested_at_last_seen,
                 {CLEAN_NAME_SQL} AS Reservoir_Name,
-                {basin_case_sql()} AS Basin_ID,
+                COALESCE({basin_case_sql()}, {CLEAN_NAME_SQL}) AS Basin_ID,
                 h_tl,
                 h_dbt,
                 h_c,
@@ -188,6 +197,8 @@ def query_history(
     return {
         "rows": payload,
         "basin_id": basin_id,
+        "model_basin_id": model_basin_id,
+        "reservoir_name": reservoir_name,
         "start_date": start.isoformat(),
         "end_date": end.isoformat(),
         "limit": limit,
@@ -221,16 +232,26 @@ def query_forecast(
     end_date: date | None,
     limit: int,
 ) -> dict[str, Any]:
-    basin_id = validate_basin_id(basin_id)
-    bounds = table_date_bounds(connection, "hydroai_forecast_daily", "Date", basin_id)
+    requested_basin_id = basin_id
+    model_basin_id, reservoir_name = resolve_basin_selector(basin_id)
+    if basin_id is not None and model_basin_id is None:
+        return {
+            "rows": [],
+            "basin_id": requested_basin_id,
+            "model_basin_id": None,
+            "reservoir_name": reservoir_name,
+            "limit": limit,
+            "truncated": False,
+        }
+    bounds = table_date_bounds(connection, "hydroai_forecast_daily", "Date", model_basin_id)
     if bounds is None:
         return {"rows": [], "limit": limit, "truncated": False}
     start, end = normalize_range(start_date, end_date, bounds[1], default_days=366)
     where = ['"Date" >= ?', '"Date" <= ?']
     params: list[Any] = [start.isoformat(), end.isoformat()]
-    if basin_id:
+    if model_basin_id:
         where.append('"Basin_ID" = ?')
-        params.append(basin_id)
+        params.append(model_basin_id)
     params.append(limit + 1)
     rows = connection.execute(
         f"""
@@ -249,7 +270,9 @@ def query_forecast(
     payload, truncated = limited_result(rows, limit)
     return {
         "rows": payload,
-        "basin_id": basin_id,
+        "basin_id": requested_basin_id,
+        "model_basin_id": model_basin_id,
+        "reservoir_name": reservoir_name,
         "start_date": start.isoformat(),
         "end_date": end.isoformat(),
         "limit": limit,
@@ -265,16 +288,27 @@ def query_generation(
     limit: int,
     include_forecast: bool,
 ) -> dict[str, Any]:
-    basin_id = validate_basin_id(basin_id)
-    bounds = table_date_bounds(connection, "pmis_generation_daily", "Date", basin_id)
+    requested_basin_id = basin_id
+    model_basin_id, reservoir_name = resolve_basin_selector(basin_id)
+    if basin_id is not None and model_basin_id is None:
+        return {
+            "actual_rows": [],
+            "forecast_rows": [],
+            "basin_id": requested_basin_id,
+            "model_basin_id": None,
+            "reservoir_name": reservoir_name,
+            "limit": limit,
+            "truncated": False,
+        }
+    bounds = table_date_bounds(connection, "pmis_generation_daily", "Date", model_basin_id)
     if bounds is None:
         return {"actual_rows": [], "forecast_rows": [], "limit": limit, "truncated": False}
     start, end = normalize_range(start_date, end_date, bounds[1], default_days=366)
     where = ['"Date" >= ?', '"Date" <= ?']
     params: list[Any] = [start.isoformat(), end.isoformat()]
-    if basin_id:
+    if model_basin_id:
         where.append('"Basin_ID" = ?')
-        params.append(basin_id)
+        params.append(model_basin_id)
     actual = connection.execute(
         f"""
         SELECT
@@ -313,7 +347,9 @@ def query_generation(
     return {
         "actual_rows": actual_payload,
         "forecast_rows": forecast_payload,
-        "basin_id": basin_id,
+        "basin_id": requested_basin_id,
+        "model_basin_id": model_basin_id,
+        "reservoir_name": reservoir_name,
         "start_date": start.isoformat(),
         "end_date": end.isoformat(),
         "limit": limit,
@@ -346,7 +382,8 @@ def create_app():
 
     def checked_basin(basin_id: str | None) -> str | None:
         try:
-            return validate_basin_id(basin_id)
+            resolve_basin_selector(basin_id)
+            return basin_id.strip() if basin_id is not None else None
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -373,35 +410,56 @@ def create_app():
     @app.get("/basins", dependencies=[Depends(require_api_key)])
     def basins() -> dict[str, Any]:
         def load(connection: sqlite3.Connection) -> dict[str, Any]:
+            rows = connection.execute(
+                f"""
+                SELECT
+                    MIN({CLEAN_NAME_SQL}) AS Reservoir_Name,
+                    MIN(observed_at) AS Min_Date,
+                    MAX(observed_at) AS Max_Date
+                FROM reservoir_readings
+                WHERE {CLEAN_NAME_SQL} <> ''
+                GROUP BY {CLEAN_NAME_SQL} COLLATE NOCASE
+                ORDER BY Reservoir_Name COLLATE NOCASE
+                """
+            ).fetchall()
+            merged_rows: dict[str, dict[str, str]] = {}
+            for row in rows:
+                raw_name = str(row["Reservoir_Name"])
+                display_name = RESERVOIR_DISPLAY_ALIASES.get(raw_name, raw_name)
+                key = display_name.casefold()
+                current = merged_rows.get(key)
+                min_date = str(row["Min_Date"])
+                max_date = str(row["Max_Date"])
+                if current is None:
+                    merged_rows[key] = {
+                        "reservoir_name": display_name,
+                        "min_date": min_date,
+                        "max_date": max_date,
+                    }
+                else:
+                    current["min_date"] = min(current["min_date"], min_date)
+                    current["max_date"] = max(current["max_date"], max_date)
             items = []
-            for basin_id, reservoir_name in RESERVOIR_BY_BASIN.items():
-                row = connection.execute(
-                    """
-                    SELECT MIN(observed_at), MAX(observed_at)
-                    FROM reservoir_readings
-                    WHERE reservoir_name = ?
-                       OR reservoir_name LIKE ?
-                       OR reservoir_name LIKE ?
-                    """,
-                    (
-                        reservoir_name,
-                        f"{reservoir_name}Đồng bộ%",
-                        f"{reservoir_name} Đồng bộ%",
-                    ),
-                ).fetchone()
+            for merged in sorted(
+                merged_rows.values(), key=lambda item: item["reservoir_name"].casefold()
+            ):
+                reservoir_name = merged["reservoir_name"]
+                model_basin_id = model_basin_for_reservoir(reservoir_name)
+                basin_id = model_basin_id or f"{RESERVOIR_ID_PREFIX}{reservoir_name}"
                 forecast_bounds = table_date_bounds(
                     connection,
                     "hydroai_forecast_daily",
                     "Date",
-                    basin_id,
+                    model_basin_id,
                 )
                 items.append(
                     {
                         "id": basin_id,
-                        "name": BASIN_NAMES.get(basin_id, basin_id),
+                        "name": BASIN_NAMES.get(model_basin_id, reservoir_name),
                         "reservoir_name": reservoir_name,
-                        "min_date": str(row[0])[:10] if row and row[0] else None,
-                        "max_date": str(row[1])[:10] if row and row[1] else None,
+                        "model_basin_id": model_basin_id,
+                        "min_date": merged["min_date"][:10],
+                        "max_date": merged["max_date"][:10],
                         "forecast_min_date": forecast_bounds[0].isoformat() if forecast_bounds else None,
                         "forecast_max_date": forecast_bounds[1].isoformat() if forecast_bounds else None,
                     }
