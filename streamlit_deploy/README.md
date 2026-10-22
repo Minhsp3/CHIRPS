@@ -22,8 +22,8 @@ $env:HYDROAI_API_KEY = "cung-khoa-voi-api-server"
 
 1. Commit thư mục `streamlit_deploy` lên GitHub.
 2. Trên Streamlit Community Cloud, chọn repository và đặt **Main file path** là:
-   `streamlit_deploy/streamlit_app.py`.
-3. Streamlit sẽ cài các gói từ `streamlit_deploy/requirements.txt`, bao gồm
+   `streamlit_app.py`.
+3. Streamlit sẽ cài các gói từ `requirements.txt`, bao gồm
    thư viện đọc Excel cho trang Truy vấn thủy văn.
 4. Cấu hình `HYDROAI_API_URL` và `HYDROAI_API_KEY` trong App settings > Secrets.
 
