@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import io
+import sys
 from pathlib import Path
 
 import altair as alt
 import pandas as pd
 import streamlit as st
+
+
+APP_DIR = Path(__file__).resolve().parent
+if str(APP_DIR) not in sys.path:
+    sys.path.insert(0, str(APP_DIR))
 
 from data_utils import (
     PLANTS,
@@ -27,9 +33,6 @@ from data_utils import (
     read_workbook,
     update_historical_workbooks,
 )
-
-
-APP_DIR = Path(__file__).resolve().parent
 
 
 @st.cache_data(ttl="5m", show_spinner="Đang đọc dữ liệu Excel...")
