@@ -206,3 +206,6 @@ PMIS/ibtracs.WP.list.v04r01.csv
 
 # Local HydroAI API credential
 .hydroai_api_key
+
+# Latest Excel uploads are persisted by the API server, not committed to Git
+Truyvan_thuyvan/saved_uploads/

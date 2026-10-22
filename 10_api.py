@@ -4,8 +4,11 @@ import json
 import os
 import secrets
 import sqlite3
+import base64
+import re
+import uuid
 from contextlib import closing
-from datetime import date, timedelta
+from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +20,9 @@ API_KEY_HEADER = "X-API-Key"
 DEFAULT_LIMIT = 1_000
 MAX_LIMIT = 10_000
 MAX_RANGE_DAYS = int(os.getenv("HYDROAI_API_MAX_RANGE_DAYS", "4000"))
+MAX_UPLOAD_FILE_BYTES = int(os.getenv("HYDROAI_MAX_UPLOAD_FILE_BYTES", str(25 * 1024 * 1024)))
+MAX_UPLOAD_BATCH_BYTES = int(os.getenv("HYDROAI_MAX_UPLOAD_BATCH_BYTES", str(50 * 1024 * 1024)))
+ALLOWED_UPLOAD_SUFFIXES = {".xls", ".xlsx", ".xlsm"}
 RESERVOIR_BY_BASIN = {
     "BTS": "Buôn Tua Srah",
     "BK": "Buôn Kuốp",
@@ -30,6 +36,107 @@ CLEAN_NAME_SQL = (
     "THEN SUBSTR(reservoir_name, 1, INSTR(reservoir_name, 'Đồng bộ lúc:') - 1) "
     "ELSE reservoir_name END)"
 )
+
+
+def hydrology_upload_dir() -> Path:
+    default = Path(__file__).resolve().parent / "Truyvan_thuyvan" / "saved_uploads"
+    return Path(os.getenv("HYDROAI_UPLOAD_DIR", str(default))).expanduser().resolve()
+
+
+def safe_upload_name(raw_name: str) -> str:
+    name = Path(raw_name).name.strip()
+    suffix = Path(name).suffix.lower()
+    if suffix not in ALLOWED_UPLOAD_SUFFIXES:
+        raise ValueError("Chỉ chấp nhận tệp Excel .xls, .xlsx hoặc .xlsm")
+    stem = re.sub(r"[^0-9A-Za-zÀ-ỹ _().-]+", "_", Path(name).stem).strip(" .")
+    if not stem:
+        stem = "du_lieu"
+    return f"{stem[:160]}{suffix}"
+
+
+def save_hydrology_uploads(payload: dict[str, Any]) -> dict[str, Any]:
+    raw_files = payload.get("files")
+    if not isinstance(raw_files, list) or not 1 <= len(raw_files) <= 20:
+        raise ValueError("Cần chọn từ 1 đến 20 tệp Excel")
+    decoded: list[tuple[str, bytes]] = []
+    total_bytes = 0
+    used_names: set[str] = set()
+    for item in raw_files:
+        if not isinstance(item, dict):
+            raise ValueError("Danh sách tệp tải lên không hợp lệ")
+        raw_name = item.get("name")
+        raw_content = item.get("content_base64")
+        if not isinstance(raw_name, str) or not 1 <= len(raw_name) <= 180:
+            raise ValueError("Tên tệp tải lên không hợp lệ")
+        if not isinstance(raw_content, str) or not raw_content:
+            raise ValueError(f"Nội dung tệp {raw_name} không hợp lệ")
+        name = safe_upload_name(raw_name)
+        if name.casefold() in used_names:
+            raise ValueError(f"Tên tệp bị trùng trong lần tải lên: {name}")
+        used_names.add(name.casefold())
+        try:
+            content = base64.b64decode(raw_content, validate=True)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"Nội dung tệp {name} không hợp lệ") from exc
+        if not content:
+            raise ValueError(f"Tệp {name} không có dữ liệu")
+        if len(content) > MAX_UPLOAD_FILE_BYTES:
+            raise ValueError(f"Tệp {name} vượt quá giới hạn dung lượng")
+        total_bytes += len(content)
+        if total_bytes > MAX_UPLOAD_BATCH_BYTES:
+            raise ValueError("Tổng dung lượng các tệp vượt quá giới hạn cho phép")
+        decoded.append((name, content))
+
+    root = hydrology_upload_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    batch_id = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}"
+    batch_dir = root / batch_id
+    batch_dir.mkdir(parents=False, exist_ok=False)
+    for name, content in decoded:
+        (batch_dir / name).write_bytes(content)
+
+    saved_at = datetime.now(timezone.utc).isoformat()
+    manifest = {
+        "batch_id": batch_id,
+        "saved_at": saved_at,
+        "files": [{"name": name, "size": len(content)} for name, content in decoded],
+    }
+    manifest_path = root / "current.json"
+    temporary_manifest = root / f".{batch_id}.json.tmp"
+    temporary_manifest.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary_manifest.replace(manifest_path)
+    return manifest
+
+
+def load_hydrology_uploads() -> dict[str, Any]:
+    root = hydrology_upload_dir()
+    manifest_path = root / "current.json"
+    if not manifest_path.is_file():
+        return {"batch_id": None, "saved_at": None, "files": []}
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    batch_id = str(manifest.get("batch_id", ""))
+    if not re.fullmatch(r"[0-9TZ-]+[0-9a-f]{8}", batch_id):
+        raise ValueError("Manifest dữ liệu tải lên không hợp lệ")
+    batch_dir = root / batch_id
+    files = []
+    for item in manifest.get("files", []):
+        name = safe_upload_name(str(item.get("name", "")))
+        path = batch_dir / name
+        if not path.is_file():
+            continue
+        content = path.read_bytes()
+        files.append(
+            {
+                "name": name,
+                "size": len(content),
+                "content_base64": base64.b64encode(content).decode("ascii"),
+            }
+        )
+    return {
+        "batch_id": batch_id,
+        "saved_at": manifest.get("saved_at"),
+        "files": files,
+    }
 
 
 def database_path() -> Path:
@@ -359,7 +466,7 @@ def query_generation(
 
 def create_app():
     try:
-        from fastapi import Depends, FastAPI, HTTPException, Query, status
+        from fastapi import Body, Depends, FastAPI, HTTPException, Query, status
         from fastapi.security import APIKeyHeader
     except ImportError as exc:
         raise ImportError("Chưa có FastAPI. Hãy cài requirements.txt") from exc
@@ -406,6 +513,30 @@ def create_app():
             "name": "HydroAI data API",
             "database_available": path.is_file(),
         }
+
+    @app.get("/hydrology-uploads", dependencies=[Depends(require_api_key)])
+    def hydrology_uploads() -> dict[str, Any]:
+        try:
+            return load_hydrology_uploads()
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Không đọc được dữ liệu thủy văn đã lưu: {exc}",
+            ) from exc
+
+    @app.post("/hydrology-uploads", dependencies=[Depends(require_api_key)])
+    def persist_hydrology_uploads(
+        payload: dict[str, Any] = Body(...),
+    ) -> dict[str, Any]:
+        try:
+            return save_hydrology_uploads(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Không lưu được dữ liệu thủy văn: {exc}",
+            ) from exc
 
     @app.get("/basins", dependencies=[Depends(require_api_key)])
     def basins() -> dict[str, Any]:

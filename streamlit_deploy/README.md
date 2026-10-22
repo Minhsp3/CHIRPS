@@ -7,7 +7,8 @@ database SQLite lên GitHub khi dữ liệu trên máy chủ thay đổi.
 
 - **Dashboard hồ chứa**: dữ liệu lịch sử và dự báo đọc qua HydroAI API.
 - **Truy vấn thủy văn**: tổng hợp sản lượng, lưu lượng và năm đồng dạng từ các
-  workbook trong `truyvan_thuyvan/`.
+  workbook trong `truyvan_thuyvan/`. Nút **Lưu dữ liệu mới nhất** gửi bộ Excel
+  đang chọn về API HydroAI để dữ liệu vẫn còn sau khi Streamlit khởi động lại.
 
 ## Chạy tại máy
 
@@ -26,5 +27,9 @@ $env:HYDROAI_API_KEY = "cung-khoa-voi-api-server"
 3. Streamlit sẽ cài các gói từ `requirements.txt`, bao gồm
    thư viện đọc Excel cho trang Truy vấn thủy văn.
 4. Cấu hình `HYDROAI_API_URL` và `HYDROAI_API_KEY` trong App settings > Secrets.
+
+API trên máy chủ phải chạy phiên bản có endpoint `/hydrology-uploads`. Mặc định
+các file mới nhất được lưu tại `Truyvan_thuyvan/saved_uploads/`; có thể đổi vị
+trí bằng biến môi trường `HYDROAI_UPLOAD_DIR`.
 
 Xem hướng dẫn đầy đủ tại `API_DEPLOYMENT.md` ở thư mục gốc dự án.

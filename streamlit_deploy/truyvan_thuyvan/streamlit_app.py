@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import base64
 import io
+import os
 import sys
 from pathlib import Path
 
 import altair as alt
 import pandas as pd
+import requests
 import streamlit as st
 
 
 APP_DIR = Path(__file__).resolve().parent
+API_CONNECT_TIMEOUT = 5
+API_READ_TIMEOUT = 45
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
@@ -33,6 +38,99 @@ from data_utils import (
     read_workbook,
     update_historical_workbooks,
 )
+
+
+class UploadStoreError(RuntimeError):
+    pass
+
+
+def setting(name: str, default: str = "") -> str:
+    short_name = name.removeprefix("HYDROAI_")
+    aliases = (name, short_name)
+    for alias in aliases:
+        value = os.getenv(alias)
+        if value:
+            return value.strip()
+    try:
+        for alias in aliases:
+            secret = st.secrets.get(alias)
+            if secret:
+                return str(secret).strip()
+        group = st.secrets.get("hydroai", {})
+        if hasattr(group, "get"):
+            for alias in (name, short_name, name.lower(), short_name.lower()):
+                secret = group.get(alias)
+                if secret:
+                    return str(secret).strip()
+    except Exception:
+        pass
+    return default
+
+
+def checked_api_response(response: requests.Response) -> dict:
+    if response.status_code == 401:
+        raise UploadStoreError("Khóa API không hợp lệ.")
+    try:
+        response.raise_for_status()
+        payload = response.json()
+    except (requests.HTTPError, ValueError) as exc:
+        detail = response.text[:300] if response.text else str(exc)
+        raise UploadStoreError(f"Máy chủ trả về lỗi {response.status_code}: {detail}") from exc
+    if not isinstance(payload, dict):
+        raise UploadStoreError("Máy chủ trả về dữ liệu không đúng định dạng.")
+    return payload
+
+
+@st.cache_data(ttl="1m", show_spinner=False)
+def load_saved_uploads(
+    api_url: str, api_key: str, refresh_token: int
+) -> tuple[tuple[tuple[str, bytes], ...], str | None]:
+    del refresh_token
+    try:
+        response = requests.get(
+            f"{api_url.rstrip('/')}/hydrology-uploads",
+            headers={"X-API-Key": api_key},
+            timeout=(API_CONNECT_TIMEOUT, API_READ_TIMEOUT),
+        )
+    except requests.RequestException as exc:
+        raise UploadStoreError("Không kết nối được kho dữ liệu trên máy chủ HydroAI.") from exc
+    payload = checked_api_response(response)
+    files: list[tuple[str, bytes]] = []
+    for item in payload.get("files", []):
+        try:
+            files.append(
+                (
+                    str(item["name"]),
+                    base64.b64decode(str(item["content_base64"]), validate=True),
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    return tuple(files), payload.get("saved_at")
+
+
+def save_uploads_to_server(
+    api_url: str, api_key: str, files: tuple[tuple[str, bytes], ...]
+) -> dict:
+    payload = {
+        "files": [
+            {
+                "name": name,
+                "content_base64": base64.b64encode(content).decode("ascii"),
+            }
+            for name, content in files
+        ]
+    }
+    try:
+        response = requests.post(
+            f"{api_url.rstrip('/')}/hydrology-uploads",
+            headers={"X-API-Key": api_key},
+            json=payload,
+            timeout=(API_CONNECT_TIMEOUT, API_READ_TIMEOUT),
+        )
+    except requests.RequestException as exc:
+        raise UploadStoreError("Không kết nối được máy chủ để lưu dữ liệu.") from exc
+    return checked_api_response(response)
 
 
 @st.cache_data(ttl="5m", show_spinner="Đang đọc dữ liệu Excel...")
@@ -105,6 +203,19 @@ st.caption("Dữ liệu được đọc trực tiếp từ Excel. Đơn vị gi�
 local_data, local_files = load_local_data(str(APP_DIR))
 daily_production, daily_hydrology = load_daily_data(str(APP_DIR))
 reported_hydrology = load_current_reports(str(APP_DIR))
+api_url = setting("HYDROAI_API_URL")
+api_key = setting("HYDROAI_API_KEY")
+upload_refresh_token = int(st.session_state.get("upload_refresh_token", 0))
+saved_uploads: tuple[tuple[str, bytes], ...] = ()
+saved_at: str | None = None
+saved_upload_error: str | None = None
+if api_url and api_key:
+    try:
+        saved_uploads, saved_at = load_saved_uploads(
+            api_url, api_key, upload_refresh_token
+        )
+    except UploadStoreError as exc:
+        saved_upload_error = str(exc)
 
 with st.sidebar:
     st.header("Nguồn dữ liệu")
@@ -114,6 +225,44 @@ with st.sidebar:
         accept_multiple_files=True,
         help="Ứng dụng tự nhận dạng bảng dài hoặc workbook có mỗi sheet là một năm.",
     )
+    current_uploads = tuple((file.name, file.getvalue()) for file in uploads)
+    save_disabled = not current_uploads or not api_url or not api_key
+    if st.button(
+        ":material/save: Lưu dữ liệu mới nhất",
+        type="primary",
+        width="stretch",
+        disabled=save_disabled,
+        help="Lưu bộ Excel đang chọn về máy chủ HydroAI để dùng lại sau khi Streamlit khởi động lại.",
+    ):
+        try:
+            result = save_uploads_to_server(api_url, api_key, current_uploads)
+            st.session_state["upload_refresh_token"] = upload_refresh_token + 1
+            st.session_state["saved_upload_notice"] = (
+                f"Đã lưu {len(result.get('files', []))} tệp làm bộ dữ liệu mới nhất."
+            )
+            load_saved_uploads.clear()
+            st.rerun()
+        except UploadStoreError as exc:
+            st.error(f"Không thể lưu dữ liệu: {exc}")
+
+    saved_notice = st.session_state.pop("saved_upload_notice", None)
+    if saved_notice:
+        st.success(saved_notice)
+    if saved_uploads:
+        saved_date = pd.to_datetime(saved_at, errors="coerce")
+        saved_label = (
+            saved_date.tz_convert("Asia/Ho_Chi_Minh").strftime("%d/%m/%Y %H:%M")
+            if pd.notna(saved_date) and saved_date.tzinfo is not None
+            else "gần nhất"
+        )
+        st.success(f"Đang dùng {len(saved_uploads)} tệp đã lưu lúc {saved_label}.")
+        for name, _ in saved_uploads:
+            st.caption(name)
+    elif saved_upload_error:
+        st.warning(saved_upload_error)
+    elif not api_url or not api_key:
+        st.info("Cần cấu hình API URL và API key để lưu dữ liệu bền vững.")
+
     if local_files:
         st.success(f"Đã đọc {len(local_files)} tệp trong thư mục.")
         for name in local_files:
@@ -122,9 +271,10 @@ with st.sidebar:
 uploaded_data = pd.DataFrame()
 uploaded_daily_production = pd.DataFrame(columns=["date", "plant", "production"])
 uploaded_reported_hydrology = pd.DataFrame(columns=["date", "plant", "flow"])
-if uploads:
+active_uploads = current_uploads or saved_uploads
+if active_uploads:
     uploaded_data, uploaded_daily_production, uploaded_reported_hydrology = load_uploaded_data(
-        tuple((file.name, file.getvalue()) for file in uploads)
+        active_uploads
     )
 
 if not uploaded_daily_production.empty:
@@ -173,6 +323,7 @@ if data_as_of is not None and not current_actuals.empty:
 with st.sidebar:
     if st.button(":material/refresh: Đọc lại dữ liệu", width="stretch"):
         st.session_state["refresh_and_sync"] = True
+        st.session_state["upload_refresh_token"] = upload_refresh_token + 1
         st.cache_data.clear()
         st.rerun()
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import base64
 import os
 import sqlite3
 import tempfile
@@ -89,6 +90,7 @@ class ApiTests(unittest.TestCase):
         create_test_database(cls.db_path)
         os.environ["HYDROAI_DB_PATH"] = str(cls.db_path)
         os.environ["HYDROAI_API_KEY"] = "test-secret"
+        os.environ["HYDROAI_UPLOAD_DIR"] = str(Path(cls.temp_dir.name) / "uploads")
         spec = importlib.util.spec_from_file_location("hydroai_api_test", API_FILE)
         assert spec and spec.loader
         cls.api = importlib.util.module_from_spec(spec)
@@ -109,6 +111,47 @@ class ApiTests(unittest.TestCase):
     def test_data_requires_api_key(self) -> None:
         self.assertEqual(self.client.get("/basins").status_code, 401)
         self.assertEqual(self.client.get("/history", headers={"X-API-Key": "wrong"}).status_code, 401)
+        self.assertEqual(self.client.get("/hydrology-uploads").status_code, 401)
+
+    def test_hydrology_uploads_are_persisted_and_returned(self) -> None:
+        content = b"test excel bytes"
+        response = self.client.post(
+            "/hydrology-uploads",
+            headers=self.headers,
+            json={
+                "files": [
+                    {
+                        "name": "BCTV_LUYKE_2026-10-21.xls",
+                        "content_base64": base64.b64encode(content).decode("ascii"),
+                    }
+                ]
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["files"][0]["name"], "BCTV_LUYKE_2026-10-21.xls")
+
+        saved = self.client.get("/hydrology-uploads", headers=self.headers)
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(len(saved.json()["files"]), 1)
+        self.assertEqual(
+            base64.b64decode(saved.json()["files"][0]["content_base64"]),
+            content,
+        )
+
+    def test_hydrology_upload_rejects_non_excel(self) -> None:
+        response = self.client.post(
+            "/hydrology-uploads",
+            headers=self.headers,
+            json={
+                "files": [
+                    {
+                        "name": "payload.txt",
+                        "content_base64": base64.b64encode(b"bad").decode("ascii"),
+                    }
+                ]
+            },
+        )
+        self.assertEqual(response.status_code, 422)
 
     def test_history_filters_and_aggregates(self) -> None:
         response = self.client.get(

@@ -5,3 +5,4 @@ __pycache__/
 .streamlit/secrets.toml
 truyvan_thuyvan/backups/
 truyvan_thuyvan/downloads/
+truyvan_thuyvan/saved_uploads/
