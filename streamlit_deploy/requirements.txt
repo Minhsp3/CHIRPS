@@ -1,5 +1,7 @@
 streamlit>=1.60,<2
-pandas>=2.2,<3
+pandas>=2.2,<4
 altair>=5.5,<7
 numpy>=1.26,<3
 requests>=2.32,<3
+openpyxl>=3.1,<4
+xlrd>=2.0,<3

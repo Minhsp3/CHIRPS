@@ -380,7 +380,6 @@ def render_dashboard(
 
 
 def main() -> None:
-    st.set_page_config(page_title="HydroAI", page_icon="💧", layout="wide")
     st.title("HydroAI - Dashboard hồ chứa")
     st.caption("Dữ liệu được đọc trực tiếp từ máy chủ HydroAI qua API bảo mật.")
 
