@@ -108,6 +108,22 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["database_available"])
 
+    def test_api_key_can_be_loaded_from_local_file(self) -> None:
+        key_file = Path(self.temp_dir.name) / ".hydroai_api_key"
+        key_file.write_text("file-secret\n", encoding="utf-8")
+        original_key = os.environ.pop("HYDROAI_API_KEY", None)
+        original_file = os.environ.get("HYDROAI_API_KEY_FILE")
+        os.environ["HYDROAI_API_KEY_FILE"] = str(key_file)
+        try:
+            self.assertEqual(self.api.configured_api_key(), "file-secret")
+        finally:
+            if original_key is not None:
+                os.environ["HYDROAI_API_KEY"] = original_key
+            if original_file is None:
+                os.environ.pop("HYDROAI_API_KEY_FILE", None)
+            else:
+                os.environ["HYDROAI_API_KEY_FILE"] = original_file
+
     def test_data_requires_api_key(self) -> None:
         self.assertEqual(self.client.get("/basins").status_code, 401)
         self.assertEqual(self.client.get("/history", headers={"X-API-Key": "wrong"}).status_code, 401)

@@ -17,6 +17,7 @@ from config import API_HOST, API_PORT, BASIN_NAMES, HOCHUA_DB_PATH, MODEL_DIR
 
 API_KEY_ENV = "HYDROAI_API_KEY"
 API_KEY_HEADER = "X-API-Key"
+API_KEY_FILE_ENV = "HYDROAI_API_KEY_FILE"
 DEFAULT_LIMIT = 1_000
 MAX_LIMIT = 10_000
 MAX_RANGE_DAYS = int(os.getenv("HYDROAI_API_MAX_RANGE_DAYS", "4000"))
@@ -141,6 +142,18 @@ def load_hydrology_uploads() -> dict[str, Any]:
 
 def database_path() -> Path:
     return Path(os.getenv("HYDROAI_DB_PATH", str(HOCHUA_DB_PATH))).expanduser().resolve()
+
+
+def configured_api_key() -> str:
+    value = os.getenv(API_KEY_ENV, "").strip()
+    if value:
+        return value
+    default_file = Path(__file__).resolve().parent / ".hydroai_api_key"
+    key_file = Path(os.getenv(API_KEY_FILE_ENV, str(default_file))).expanduser()
+    try:
+        return key_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
 
 
 def open_database() -> sqlite3.Connection:
@@ -475,11 +488,11 @@ def create_app():
     api_key_header = APIKeyHeader(name=API_KEY_HEADER, auto_error=False)
 
     def require_api_key(api_key: str | None = Depends(api_key_header)) -> None:
-        expected = os.getenv(API_KEY_ENV, "")
+        expected = configured_api_key()
         if not expected:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"Máy chủ chưa cấu hình {API_KEY_ENV}",
+                detail=f"Máy chủ chưa cấu hình {API_KEY_ENV} hoặc file .hydroai_api_key",
             )
         if not api_key or not secrets.compare_digest(api_key, expected):
             raise HTTPException(
