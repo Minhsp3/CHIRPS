@@ -86,6 +86,51 @@ class HydrologyQueryTests(unittest.TestCase):
 
         self.assertAlmostEqual(result.at["Buôn Kuốp", "T11"], 32.0)
 
+    def test_projection_uses_analog_year_selected_by_comparison(self) -> None:
+        rows = []
+        for plant in ("Buôn Kuốp", "Buôn Tua Srah", "Srêpốk 3"):
+            for month in range(1, 13):
+                rows.extend(
+                    [
+                        {
+                            "year": 2021,
+                            "month": month,
+                            "plant": plant,
+                            "production": 21.0,
+                            "flow": 100.0,
+                        },
+                        {
+                            "year": 2022,
+                            "month": month,
+                            "plant": plant,
+                            "production": 99.0,
+                            "flow": 100.0,
+                        },
+                    ]
+                )
+            for month in range(1, 11):
+                rows.append(
+                    {
+                        "year": 2026,
+                        "month": month,
+                        "plant": plant,
+                        "production": 99.0,
+                        "flow": 100.0,
+                    }
+                )
+
+        result = annual_projection_table(
+            pd.DataFrame(rows),
+            2026,
+            10,
+            pd.Timestamp("2026-10-31"),
+            analog_years={plant: 2021 for plant in ("Buôn Kuốp", "Buôn Tua Srah", "Srêpốk 3")},
+        ).set_index("Nhà máy")
+
+        self.assertEqual(result.at["Buôn Kuốp", "Năm quy luật"], 2021)
+        self.assertEqual(result.at["Buôn Kuốp", "T11"], 21.0)
+        self.assertEqual(result.at["Buôn Kuốp", "T12"], 21.0)
+
     def test_new_upload_keeps_other_report_types_and_replaces_same_family(self) -> None:
         saved = (
             ("BCSX_Thang (50).xls", b"old-month"),

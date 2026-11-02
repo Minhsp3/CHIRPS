@@ -522,11 +522,33 @@ analog_data = prepare_analog_comparison_data(
 )
 if is_partial_month:
     analog_month = month
+
+comparison_view_state = st.session_state.get("historical_comparison_view", "Năm")
+saved_comparison_month = st.session_state.get("historical_comparison_month", analog_month)
+summary_month = (
+    int(saved_comparison_month)
+    if comparison_view_state == "Năm"
+    and isinstance(saved_comparison_month, (int, float))
+    and 1 <= int(saved_comparison_month) <= analog_month
+    else month
+)
+summary_as_of = (
+    data_as_of
+    if summary_month == month
+    else pd.Timestamp(year=year, month=summary_month, day=1) + pd.offsets.MonthEnd(0)
+)
+summary_is_partial = bool(
+    summary_as_of is not None
+    and summary_as_of.year == year
+    and summary_as_of.month == summary_month
+    and summary_as_of.day < summary_as_of.days_in_month
+)
+
 if data_as_of is not None and data_as_of.year == year and data_as_of.month == month:
     st.success(f"Dữ liệu thực tế cập nhật đến ngày {data_as_of.strftime('%d/%m/%Y')}.")
-    summary_title = f"Tổng hợp đến ngày {data_as_of.strftime('%d/%m/%Y')}"
-    production_label = f"Sản lượng lũy kế đến {data_as_of.strftime('%d/%m')}"
-    flow_label = f"Lưu lượng TB đến {data_as_of.strftime('%d/%m')}"
+    summary_title = f"Tổng hợp đến ngày {summary_as_of.strftime('%d/%m/%Y')}"
+    production_label = f"Sản lượng lũy kế đến {summary_as_of.strftime('%d/%m')}"
+    flow_label = f"Lưu lượng TB đến {summary_as_of.strftime('%d/%m')}"
 elif not is_calendar_current:
     st.warning(
         f"Excel chưa có dữ liệu cho tháng hiện tại. Trang đang hiển thị kỳ mới nhất tìm thấy: tháng {month}/{year}."
@@ -540,26 +562,36 @@ else:
     production_label = "Sản lượng tháng hiện tại"
     flow_label = "Lưu lượng hiện tại"
 
-period = data[(data["year"] == year) & (data["month"] == month)].set_index("plant")
+period = data[(data["year"] == year) & (data["month"] == summary_month)].set_index("plant")
 comparison_year: int | None = None
 comparison_production_label: str | None = None
 comparison_production = pd.DataFrame()
 comparison_index = pd.DataFrame()
-if data_as_of is not None and data_as_of.year == year and data_as_of.month == month:
+if summary_as_of is not None and summary_as_of.year == year:
     comparison_year = year - 1
     comparison_production_label = f"Sản lượng lũy kế cùng kỳ {comparison_year}"
-    comparison_production = monthly_cumulative_production(
-        daily_production,
-        comparison_year,
-        month,
-        data_as_of.day,
-    )
+    if summary_is_partial:
+        comparison_production = monthly_cumulative_production(
+            daily_production,
+            comparison_year,
+            summary_month,
+            summary_as_of.day,
+        )
+    else:
+        comparison_production = (
+            data[
+                (data["year"] == comparison_year)
+                & (data["month"] == summary_month)
+            ][["plant", "production"]]
+            .assign(days=summary_as_of.days_in_month)
+            .reset_index(drop=True)
+        )
     comparison_index = comparison_production.set_index("plant")
 
 summary_rows: list[dict[str, object]] = []
 best_by_plant: dict[str, int | None] = {}
 for plant in PLANTS:
-    ranked = rank_analog_years(analog_data, year, analog_month, plant)
+    ranked = rank_analog_years(analog_data, year, summary_month, plant)
     analog_year = int(ranked.iloc[0]["year"]) if not ranked.empty else None
     best_by_plant[plant] = analog_year
     current_production = period.at[plant, "production"] if plant in period.index else None
@@ -609,17 +641,17 @@ st.dataframe(
     column_config=summary_column_config,
 )
 
-if comparison_year is not None and data_as_of is not None:
+if comparison_year is not None and summary_as_of is not None:
     st.caption(
         f"Sản lượng cùng kỳ {comparison_year} là tổng từ "
-        f"01–{data_as_of.day:02d}/{month:02d}/{comparison_year}."
+        f"01–{summary_as_of.day:02d}/{summary_month:02d}/{comparison_year}."
     )
     incomplete_plants = comparison_production.loc[
-        comparison_production["days"] < data_as_of.day, "plant"
+        comparison_production["days"] < summary_as_of.day, "plant"
     ].tolist()
     if incomplete_plants:
         st.warning(
-            f"Dữ liệu cùng kỳ {comparison_year} chưa đủ {data_as_of.day} ngày cho: "
+            f"Dữ liệu cùng kỳ {comparison_year} chưa đủ {summary_as_of.day} ngày cho: "
             + ", ".join(incomplete_plants)
             + "."
         )
@@ -627,14 +659,14 @@ if comparison_year is not None and data_as_of is not None:
 with st.container(horizontal=True, horizontal_alignment="left", vertical_alignment="center"):
     if st.button(":material/query_stats: Truy vấn cả 3 nhà máy", type="primary"):
         st.session_state["selected_plant"] = "Tất cả"
-    if is_partial_month and data_as_of is not None:
+    if summary_is_partial and summary_as_of is not None:
         st.caption(
-            f"Năm đồng dạng được tính từ T1–T{month}. T{month} so sánh cùng kỳ "
-            f"01–{data_as_of.day:02d}/{month:02d}: sản lượng lũy kế và lưu lượng trung bình."
+            f"Năm đồng dạng được tính từ T1–T{summary_month}. T{summary_month} so sánh cùng kỳ "
+            f"01–{summary_as_of.day:02d}/{summary_month:02d}: sản lượng lũy kế và lưu lượng trung bình."
         )
     else:
         st.caption(
-            f"Năm đồng dạng được xác định từ quy luật sản lượng và lưu lượng tháng 1–{analog_month}; "
+            f"Năm đồng dạng được xác định từ quy luật sản lượng và lưu lượng tháng 1–{summary_month}; "
             "năm lịch sử thiếu dữ liệu trong giai đoạn này sẽ không được xếp hạng."
         )
 
@@ -786,6 +818,7 @@ else:
         f"{comparison_suffix}"
     )
 
+selected_analog_years: dict[str, int] = {}
 chart_columns = st.columns(3, gap="medium")
 for chart_column, plant in zip(chart_columns, PLANTS):
     ranking = rank_analog_years(analog_data, year, ranking_month, plant)
@@ -803,6 +836,7 @@ for chart_column, plant in zip(chart_columns, PLANTS):
             st.info(f"Năm {manual_analog_year} chưa đủ dữ liệu để so sánh.")
             continue
         analog_year = int(selected_ranking.iloc[0]["year"])
+        selected_analog_years[plant] = analog_year
         similarity = float(selected_ranking.iloc[0]["similarity"])
         st.metric(
             f"{year} so với {analog_year}",
@@ -1150,6 +1184,19 @@ if selected:
 
 st.divider()
 st.subheader(f"Dự kiến sản lượng còn lại năm {year}")
+projection_cutoff_month = comparison_month if comparison_view == "Năm" else month
+projection_as_of = (
+    data_as_of
+    if projection_cutoff_month == month
+    else pd.Timestamp(year=year, month=projection_cutoff_month, day=1)
+    + pd.offsets.MonthEnd(0)
+)
+projection_is_partial = bool(
+    projection_as_of is not None
+    and projection_as_of.year == year
+    and projection_as_of.month == projection_cutoff_month
+    and projection_as_of.day < projection_as_of.days_in_month
+)
 projection_method = st.segmented_control(
     "Phương pháp tính",
     options=["Năm đồng dạng", "Lưu lượng thực tế TB 7 ngày"],
@@ -1157,6 +1204,10 @@ projection_method = st.segmented_control(
     key="remaining_generation_method",
     help="Chọn cách dự kiến sản lượng cho các ngày còn lại đến cuối năm.",
 )
+if projection_method == "Lưu lượng thực tế TB 7 ngày":
+    projection_cutoff_month = month
+    projection_as_of = data_as_of
+    projection_is_partial = is_partial_month
 inflow_projection = pd.DataFrame()
 if data_as_of is not None:
     inflow_projection = seven_day_inflow_generation_projection(
@@ -1170,15 +1221,25 @@ if projection_method == "Lưu lượng thực tế TB 7 ngày" and not inflow_pr
     )
 else:
     projection = annual_projection_table(
-        data, year, month, data_as_of, daily_production, analog_data
+        data,
+        year,
+        projection_cutoff_month,
+        projection_as_of,
+        daily_production,
+        analog_data,
+        selected_analog_years,
     )
     if projection_method == "Lưu lượng thực tế TB 7 ngày":
         st.warning("Chưa đủ lưu lượng và mực nước để tính theo trung bình 7 ngày; đang dùng năm đồng dạng.")
-forecast_columns = [f"T{forecast_month}" for forecast_month in range(month + 1, 13)]
+forecast_columns = [
+    f"T{forecast_month}" for forecast_month in range(projection_cutoff_month + 1, 13)
+]
 
-if is_partial_month and data_as_of is not None:
+if projection_is_partial and projection_as_of is not None:
     projection_by_plant = projection.set_index("Nhà máy")
-    current_month = data[(data["year"] == year) & (data["month"] == month)].set_index("plant")
+    current_month = data[
+        (data["year"] == year) & (data["month"] == projection_cutoff_month)
+    ].set_index("plant")
     remainder_rows = []
     for plant in PLANTS:
         actual_value = (
@@ -1186,17 +1247,19 @@ if is_partial_month and data_as_of is not None:
             if plant in current_month.index and pd.notna(current_month.at[plant, "production"])
             else float("nan")
         )
-        projected_month = float(projection_by_plant.at[plant, f"T{month}"])
+        projected_month = float(
+            projection_by_plant.at[plant, f"T{projection_cutoff_month}"]
+        )
         later_months = sum(
             float(projection_by_plant.at[plant, f"T{future_month}"])
-            for future_month in range(month + 1, 13)
+            for future_month in range(projection_cutoff_month + 1, 13)
         )
         remainder_rows.append(
             {
                 "Nhà máy": plant,
-                f"Thực tế 1–{data_as_of.day}/{month}": actual_value,
-                f"Dự kiến {data_as_of.day + 1}–{data_as_of.days_in_month}/{month}": projected_month - actual_value,
-                f"Dự kiến T{month}": projected_month,
+                f"Thực tế 1–{projection_as_of.day}/{projection_cutoff_month}": actual_value,
+                f"Dự kiến {projection_as_of.day + 1}–{projection_as_of.days_in_month}/{projection_cutoff_month}": projected_month - actual_value,
+                f"Dự kiến T{projection_cutoff_month}": projected_month,
                 "Dự kiến các tháng sau": later_months,
                 f"Sản lượng còn lại {year}": projected_month - actual_value + later_months,
                 f"Dự kiến cả năm {year}": float(projection_by_plant.at[plant, "Tổng năm"]),
@@ -1247,11 +1310,17 @@ if is_partial_month and data_as_of is not None:
             )
     else:
         st.caption(
-            f"Đơn vị: triệu kWh. Phần còn lại của tháng {month} được cộng theo sản lượng "
+            f"Đơn vị: triệu kWh. Phần còn lại của tháng {projection_cutoff_month} "
+            "được cộng theo sản lượng "
             "từng ngày tương ứng của năm đồng dạng."
         )
     daily_forecast = daily_remaining_production_forecast(
-        data, daily_production, year, month, data_as_of, analog_data
+        data,
+        daily_production,
+        year,
+        projection_cutoff_month,
+        projection_as_of,
+        analog_data,
     )
     if projection_method == "Năm đồng dạng" and not daily_forecast.empty:
         with st.expander("Xem dự kiến từng ngày còn lại trong tháng"):
@@ -1277,8 +1346,8 @@ def style_projection(frame: pd.DataFrame) -> pd.DataFrame:
         styles.loc[~total_mask, forecast_columns] = (
             "color: #c62828; background-color: #fff1f1; font-weight: 600"
         )
-    if is_partial_month:
-        styles.loc[~total_mask, f"T{month}"] = (
+    if projection_is_partial:
+        styles.loc[~total_mask, f"T{projection_cutoff_month}"] = (
             "color: #8a5200; background-color: #fff4d6; font-weight: 600"
         )
     styles.loc[total_mask, :] = "background-color: #eaf2f7; font-weight: 700"
@@ -1306,29 +1375,35 @@ st.dataframe(
     column_config=projection_columns,
 )
 with st.container(horizontal=True, horizontal_alignment="left"):
-    actual_end_month = month - 1 if is_partial_month else month
+    actual_end_month = (
+        projection_cutoff_month - 1
+        if projection_is_partial
+        else projection_cutoff_month
+    )
     st.caption(f"🔵 Thực tế: sản lượng {year} từ T1 đến T{actual_end_month}")
-    if is_partial_month and data_as_of is not None:
+    if projection_is_partial and projection_as_of is not None:
         st.caption(
-            f"🟠 T{month}: thực tế đến {data_as_of.day}/{month} + phần còn lại theo "
+            f"🟠 T{projection_cutoff_month}: thực tế đến "
+            f"{projection_as_of.day}/{projection_cutoff_month} + phần còn lại theo "
             + ("Q TB 7 ngày" if projection_method == "Lưu lượng thực tế TB 7 ngày" else "năm quy luật")
         )
     if forecast_columns:
         st.caption(
             "🔴 Dự kiến: "
             + ("Q TB 7 ngày giữ không đổi" if projection_method == "Lưu lượng thực tế TB 7 ngày" else "sản lượng năm quy luật")
-            + f" từ T{month + 1} đến T12"
+            + f" từ T{projection_cutoff_month + 1} đến T12"
         )
-if is_partial_month and projection_method == "Năm đồng dạng":
+if projection_is_partial and projection_method == "Năm đồng dạng":
     st.info(
         f"Sản lượng và lưu lượng hiện tại được tổng hợp từ dữ liệu ngày đến "
-        f"{data_as_of.strftime('%d/%m/%Y')}. Năm đồng dạng dùng dữ liệu T1–T{month}; "
-        f"T{month} được ước từ sản lượng bình quân ngày và lưu lượng trung bình hiện có. "
-        f"Dự kiến phần còn lại của T{month} lấy từng ngày của năm đồng dạng."
+        f"{projection_as_of.strftime('%d/%m/%Y')}. Năm đồng dạng dùng dữ liệu "
+        f"T1–T{projection_cutoff_month}; T{projection_cutoff_month} được ước từ "
+        "sản lượng bình quân ngày và lưu lượng trung bình hiện có. "
+        f"Dự kiến phần còn lại của T{projection_cutoff_month} lấy từng ngày của năm đồng dạng."
     )
-elif is_partial_month:
+elif projection_is_partial:
     st.info(
-        f"Dự kiến từ ngày {(data_as_of + pd.Timedelta(days=1)).strftime('%d/%m/%Y')} đến 31/12/{year} "
+        f"Dự kiến từ ngày {(projection_as_of + pd.Timedelta(days=1)).strftime('%d/%m/%Y')} đến 31/12/{year} "
         "dùng lưu lượng về trung bình 7 ngày gần nhất và suất hao nước từng nhà máy. "
         "Kết quả là ước tính theo giả định lưu lượng giữ nguyên, không phải kế hoạch huy động chính thức."
     )

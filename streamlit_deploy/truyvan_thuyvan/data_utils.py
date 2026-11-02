@@ -1688,6 +1688,7 @@ def annual_projection_table(
     actual_as_of: pd.Timestamp | None = None,
     daily_production: pd.DataFrame | None = None,
     ranking_data: pd.DataFrame | None = None,
+    analog_years: dict[str, int] | None = None,
 ) -> pd.DataFrame:
     """Combine actual production with analog-year values for the remaining months.
 
@@ -1717,13 +1718,17 @@ def annual_projection_table(
     ranking_source = ranking_data if ranking_data is not None else df
 
     for plant in PLANTS:
-        ranking = rank_analog_years(
-            ranking_source,
-            current_year,
-            cutoff_month if ranking_data is not None else ranking_month,
-            plant,
-        )
-        analog_year = int(ranking.iloc[0]["year"]) if not ranking.empty else None
+        forced_analog_year = (analog_years or {}).get(plant)
+        if forced_analog_year is not None:
+            analog_year = int(forced_analog_year)
+        else:
+            ranking = rank_analog_years(
+                ranking_source,
+                current_year,
+                cutoff_month if ranking_data is not None else ranking_month,
+                plant,
+            )
+            analog_year = int(ranking.iloc[0]["year"]) if not ranking.empty else None
         current = (
             df[(df["year"] == current_year) & (df["plant"] == plant)]
             .set_index("month")["production"]
