@@ -695,26 +695,58 @@ with month_control:
 ranking_month = min(comparison_month, analog_month)
 overall_ranking = rank_analog_years(analog_data, year, ranking_month)
 historical_years = (
-    sorted(overall_ranking["year"].astype(int).tolist(), reverse=True)
-    if not overall_ranking.empty
+    sorted(
+        analog_data.loc[analog_data["year"] < year, "year"]
+        .dropna()
+        .astype(int)
+        .unique()
+        .tolist(),
+        reverse=True,
+    )
+    if not analog_data.empty
     else []
 )
-if st.session_state.get("historical_comparison_year") not in [None, *historical_years]:
-    st.session_state["historical_comparison_year"] = None
-with year_control:
-    history_choice = st.selectbox(
-        "Chọn năm lịch sử",
-        options=[None, *historical_years],
-        format_func=lambda value: (
-            "Tự động – năm đồng dạng nhất" if value is None else str(value)
-        ),
-        help=(
-            "Chọn một năm để cả ba biểu đồ cùng so sánh với năm đó. "
-            "Chế độ tự động chọn năm có sai lệch bình quân nhỏ nhất cho từng nhà máy."
-        ),
-        key="historical_comparison_year",
+if "historical_comparison_auto" not in st.session_state:
+    st.session_state["historical_comparison_auto"] = (
+        st.session_state.get("historical_comparison_year") is None
     )
-manual_analog_year = int(history_choice) if history_choice is not None else None
+if historical_years:
+    saved_history_year = st.session_state.get(
+        "historical_comparison_year_input",
+        st.session_state.get("historical_comparison_year", max(historical_years)),
+    )
+    if saved_history_year not in historical_years:
+        saved_history_year = max(historical_years)
+    st.session_state["historical_comparison_year_input"] = int(saved_history_year)
+with year_control:
+    if historical_years:
+        st.caption(
+            f"Có {len(historical_years)} năm lịch sử, từ {min(historical_years)} "
+            f"đến {max(historical_years)}. Tắt Tự động để nhập trực tiếp năm cần xem."
+        )
+    auto_history_year = st.toggle(
+        "Tự động chọn năm đồng dạng nhất",
+        help=(
+            "Bật để mỗi nhà máy tự chọn năm có sai lệch bình quân nhỏ nhất. "
+            "Tắt để nhập một năm lịch sử dùng chung cho cả ba biểu đồ."
+        ),
+        key="historical_comparison_auto",
+    )
+    if historical_years:
+        history_choice = st.number_input(
+            "Nhập năm lịch sử",
+            min_value=min(historical_years),
+            max_value=max(historical_years),
+            step=1,
+            disabled=auto_history_year,
+            key="historical_comparison_year_input",
+        )
+    else:
+        history_choice = None
+        st.warning("Chưa đọc được bộ dữ liệu năm lịch sử.")
+manual_analog_year = (
+    None if auto_history_year or history_choice is None else int(history_choice)
+)
 comparison_is_partial = bool(
     comparison_view == "Năm" and is_partial_month and comparison_month == month
 )

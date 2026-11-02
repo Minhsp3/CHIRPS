@@ -455,6 +455,11 @@ def main() -> None:
             min_value=min_date,
             max_value=max_date,
         )
+        st.caption(
+            f"Dữ liệu chi tiết mực nước/lưu lượng của hồ này có từ "
+            f"{min_date.strftime('%d/%m/%Y')}. Dữ liệu tháng 1977–2024 dùng tìm "
+            "năm đồng dạng nằm tại trang Truy vấn thủy văn."
+        )
         valid_range = isinstance(selected_range, (tuple, list)) and len(selected_range) == 2
         reference_year = selected_range[1].year if valid_range else actual_max_date.year
         comparison_years = [
