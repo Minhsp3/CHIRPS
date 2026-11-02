@@ -13,6 +13,11 @@ import streamlit as st
 
 
 APP_DIR = Path(__file__).resolve().parent
+ANALOG_TRAINING_WORKBOOK = (
+    APP_DIR.parents[1]
+    / "PMIS"
+    / "Dữ liệu huấn luyện dự báo sản lượng Buon Kuop qua các năm.xlsx"
+)
 API_CONNECT_TIMEOUT = 5
 API_READ_TIMEOUT = 45
 if str(APP_DIR) not in sys.path:
@@ -32,6 +37,7 @@ from data_utils import (
     load_current_hydrology_reports,
     load_daily_folders,
     load_folder,
+    load_analog_training_workbook,
     merge_current_calendar_month_actuals,
     merge_monthly_actuals,
     merge_daily_hydrology,
@@ -237,6 +243,11 @@ def load_local_data(folder: str) -> tuple[pd.DataFrame, list[str]]:
     return load_folder(folder)
 
 
+@st.cache_data(ttl="1h", show_spinner="Đang đọc bộ lịch sử năm đồng dạng...")
+def load_analog_training_data(path: str) -> pd.DataFrame:
+    return load_analog_training_workbook(path)
+
+
 @st.cache_data(ttl="5m", show_spinner="Đang đọc dữ liệu sản lượng và thủy văn ngày...")
 def load_daily_data(folder: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     return load_daily_folders(folder)
@@ -295,6 +306,7 @@ st.title("Sản lượng và lưu lượng tháng hiện tại")
 st.caption("Dữ liệu được đọc trực tiếp từ Excel. Đơn vị giữ nguyên theo nguồn: sản lượng triệu kWh, lưu lượng m³/s.")
 
 local_data, local_files = load_local_data(str(APP_DIR))
+analog_training_data = load_analog_training_data(str(ANALOG_TRAINING_WORKBOOK))
 daily_production, daily_hydrology = load_daily_data(str(APP_DIR))
 reported_hydrology = load_current_reports(str(APP_DIR))
 api_url = setting("HYDROAI_API_URL")
@@ -390,6 +402,12 @@ with st.sidebar:
         st.success(f"Đã đọc {len(local_files)} tệp trong thư mục.")
         for name in local_files:
             st.caption(name)
+    if not analog_training_data.empty:
+        st.success(
+            "Bộ năm đồng dạng: "
+            f"{int(analog_training_data['year'].min())}–"
+            f"{int(analog_training_data['year'].max())}, 3 nhà máy."
+        )
 
 uploaded_data = pd.DataFrame()
 uploaded_daily_production = pd.DataFrame(columns=["date", "plant", "production"])
@@ -427,7 +445,8 @@ if data_as_of is None and cutoff_path.exists():
         data_as_of = None
 
 persisted_actuals = pd.DataFrame(saved_monthly_actuals)
-data = merge_monthly_actuals(local_data, persisted_actuals)
+data = merge_monthly_actuals(analog_training_data, local_data)
+data = merge_monthly_actuals(data, persisted_actuals)
 data = merge_monthly_actuals(data, uploaded_data)
 
 current_actuals = current_month_actuals(

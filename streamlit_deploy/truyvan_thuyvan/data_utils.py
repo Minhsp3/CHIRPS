@@ -1107,6 +1107,24 @@ def read_workbook(
     return _combine_metric_rows(pd.concat(frames, ignore_index=True)) if frames else pd.DataFrame()
 
 
+def load_analog_training_workbook(source: str | Path) -> pd.DataFrame:
+    """Load observed history, excluding forecast rows in the PMIS matrices."""
+    path = Path(source)
+    columns = ["year", "month", "plant", "production", "flow"]
+    if not path.is_file():
+        return pd.DataFrame(columns=columns)
+    with pd.ExcelFile(path) as excel:
+        observed_years = [
+            int(match.group(1))
+            for sheet in excel.sheet_names
+            if (match := re.fullmatch(r"\s*((?:19|20)\d{2})\s*", str(sheet)))
+        ]
+    if not observed_years:
+        return pd.DataFrame(columns=columns)
+    parsed = read_workbook(io.BytesIO(path.read_bytes()))
+    return parsed[parsed["year"] <= max(observed_years)].reset_index(drop=True)
+
+
 def load_folder(folder: str | Path) -> tuple[pd.DataFrame, list[str]]:
     folder = Path(folder)
     cutoff_date = None

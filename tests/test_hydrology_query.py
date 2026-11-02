@@ -13,6 +13,7 @@ sys.path.insert(0, str(QUERY_APP_DIR))
 
 from data_utils import (
     annual_inflow_projection_table,
+    load_analog_training_workbook,
     merge_daily_hydrology,
     merge_current_calendar_month_actuals,
     merge_monthly_actuals,
@@ -21,6 +22,26 @@ from data_utils import (
 
 
 class HydrologyQueryTests(unittest.TestCase):
+    def test_pmis_training_workbook_supplies_observed_history_from_1977(self) -> None:
+        workbook = (
+            ROOT
+            / "PMIS"
+            / "Dữ liệu huấn luyện dự báo sản lượng Buon Kuop qua các năm.xlsx"
+        )
+
+        result = load_analog_training_workbook(workbook)
+
+        self.assertEqual(int(result["year"].min()), 1977)
+        self.assertEqual(int(result["year"].max()), 2024)
+        self.assertEqual(result["plant"].nunique(), 3)
+        self.assertEqual(len(result[result["year"] == 1977]), 36)
+        self.assertTrue(
+            result[result["year"] == 1977][["production", "flow"]]
+            .notna()
+            .all()
+            .all()
+        )
+
     def test_new_monthly_actual_overrides_stale_value_and_keeps_old_months(self) -> None:
         history = pd.DataFrame(
             [
