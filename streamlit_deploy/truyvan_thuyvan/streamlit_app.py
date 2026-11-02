@@ -693,7 +693,6 @@ with month_control:
     )
 
 ranking_month = min(comparison_month, analog_month)
-overall_ranking = rank_analog_years(analog_data, year, ranking_month)
 historical_years = (
     sorted(
         analog_data.loc[analog_data["year"] < year, "year"]
@@ -747,12 +746,26 @@ with year_control:
 manual_analog_year = (
     None if auto_history_year or history_choice is None else int(history_choice)
 )
+manual_uses_completed_months = bool(
+    manual_analog_year is not None
+    and comparison_view == "Năm"
+    and is_partial_month
+    and comparison_month == month
+    and month > 1
+)
+if manual_uses_completed_months:
+    ranking_month = month - 1
 comparison_is_partial = bool(
-    comparison_view == "Năm" and is_partial_month and comparison_month == month
+    comparison_view == "Năm"
+    and is_partial_month
+    and comparison_month == month
+    and not manual_uses_completed_months
 )
 comparison_suffix = (
     f" (T{month} tính đến {data_as_of.day}/{month})"
     if comparison_is_partial and data_as_of is not None
+    else f" (dữ liệu hoàn tất đến T{ranking_month})"
+    if manual_uses_completed_months
     else ""
 )
 analog_period_label = (
@@ -766,7 +779,9 @@ if comparison_view == "Tháng":
     )
 else:
     comparison_heading.subheader(
-        f"So sánh mức tương đồng đến tháng {comparison_month}{comparison_suffix}"
+        f"So sánh mức tương đồng đến tháng "
+        f"{ranking_month if manual_uses_completed_months else comparison_month}"
+        f"{comparison_suffix}"
     )
 
 chart_columns = st.columns(3, gap="medium")
