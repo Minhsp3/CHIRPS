@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -12,6 +13,7 @@ QUERY_APP_DIR = ROOT / "streamlit_deploy" / "truyvan_thuyvan"
 sys.path.insert(0, str(QUERY_APP_DIR))
 
 from data_utils import (
+    _parse_annual_production_report,
     annual_inflow_projection_table,
     load_analog_training_workbook,
     merge_daily_hydrology,
@@ -22,6 +24,40 @@ from data_utils import (
 
 
 class HydrologyQueryTests(unittest.TestCase):
+    def test_annual_production_report_uses_gross_mwh_as_monthly_actuals(self) -> None:
+        raw = pd.DataFrame([[None] * 26 for _ in range(6)])
+        raw.iat[0, 0] = "BÁO CÁO SẢN XUẤT NĂM 2026"
+        raw.iat[2, 0] = "Tháng"
+        raw.iat[2, 1] = "Buôn Tua Srah"
+        raw.iat[2, 9] = "Buôn Kuốp"
+        raw.iat[2, 17] = "Srepok 3"
+        for column in (1, 9, 17):
+            raw.iat[3, column] = "Đầu cực (MWh)"
+        raw.iat[4, 0] = 1
+        raw.iat[4, 1] = 26021.2938
+        raw.iat[4, 9] = 103249.1049
+        raw.iat[4, 17] = 76804.7064
+        raw.iat[5, 0] = 2
+        raw.iat[5, 1] = 0
+        raw.iat[5, 9] = 0
+        raw.iat[5, 17] = 0
+
+        class FakeExcel:
+            sheet_names = ["BCSX Năm"]
+
+        with patch("data_utils.pd.ExcelFile", return_value=FakeExcel()), patch(
+            "data_utils.pd.read_excel", return_value=raw
+        ):
+            result = _parse_annual_production_report("annual.xls")
+
+        self.assertEqual(set(result["month"]), {1})
+        self.assertAlmostEqual(result["production"].sum(), 206.0751051, places=7)
+        self.assertAlmostEqual(
+            result.loc[result["plant"] == "Buôn Kuốp", "production"].iloc[0],
+            103.2491049,
+            places=7,
+        )
+
     def test_pmis_training_workbook_supplies_observed_history_from_1977(self) -> None:
         workbook = (
             ROOT

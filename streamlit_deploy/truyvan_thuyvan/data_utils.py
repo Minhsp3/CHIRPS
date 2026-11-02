@@ -333,6 +333,91 @@ def read_daily_production_workbook(
     )
 
 
+def _parse_annual_production_report(source: str | Path | BinaryIO) -> pd.DataFrame:
+    """Parse annual EVN production reports and return gross generation by month."""
+    excel = pd.ExcelFile(source)
+    records: list[dict[str, object]] = []
+    for sheet in excel.sheet_names:
+        raw = pd.read_excel(excel, sheet_name=sheet, header=None)
+        if raw.empty or raw.shape[1] < 4:
+            continue
+
+        year = None
+        for value in raw.iloc[:8].to_numpy().ravel():
+            match = re.search(r"\bnam\s*((?:19|20)\d{2})\b", _plain(value))
+            if match:
+                year = int(match.group(1))
+                break
+        if year is None:
+            continue
+
+        header_row = None
+        plant_columns: dict[str, int] = {}
+        for row_idx in range(min(12, len(raw))):
+            row_plants = {
+                plant: col_idx
+                for col_idx, value in enumerate(raw.iloc[row_idx])
+                if (plant := canonical_plant(value)) is not None
+            }
+            first_label = _plain(raw.iat[row_idx, 0])
+            if len(row_plants) >= 2 and "thang" in first_label:
+                header_row = row_idx
+                plant_columns = row_plants
+                break
+        if header_row is None:
+            continue
+
+        metric_row = None
+        unit_scale = 1.0 / 1000.0
+        for row_idx in range(header_row + 1, min(header_row + 4, len(raw))):
+            labels = [_plain(raw.iat[row_idx, column]) for column in plant_columns.values()]
+            if labels and all("dau cuc" in label for label in labels):
+                metric_row = row_idx
+                sample_label = labels[0]
+                if "tr.kwh" in sample_label or "trieu kwh" in sample_label:
+                    unit_scale = 1.0
+                elif "kwh" in sample_label and "mwh" not in sample_label:
+                    unit_scale = 1.0 / 1_000_000.0
+                break
+        if metric_row is None:
+            continue
+
+        monthly_rows: list[tuple[int, int]] = []
+        for row_idx in range(metric_row + 1, len(raw)):
+            month_value = _number(raw.iat[row_idx, 0])
+            if np.isfinite(month_value) and month_value.is_integer() and 1 <= month_value <= 12:
+                monthly_rows.append((row_idx, int(month_value)))
+        if not monthly_rows:
+            continue
+
+        last_actual_month = max(
+            (
+                month
+                for row_idx, month in monthly_rows
+                if any(
+                    np.isfinite(value := _number(raw.iat[row_idx, column])) and value > 0
+                    for column in plant_columns.values()
+                )
+            ),
+            default=0,
+        )
+        for row_idx, month in monthly_rows:
+            if month > last_actual_month:
+                continue
+            for plant, column in plant_columns.items():
+                value = _number(raw.iat[row_idx, column])
+                if np.isfinite(value):
+                    records.append(
+                        {
+                            "year": year,
+                            "month": month,
+                            "plant": plant,
+                            "production": float(value) * unit_scale,
+                        }
+                    )
+    return _combine_metric_rows(pd.DataFrame(records))
+
+
 def read_daily_hydrology_workbook(source: str | Path | BinaryIO) -> pd.DataFrame:
     """Read daily mean inflow from a TV_Ngay workbook."""
     excel = pd.ExcelFile(source)
@@ -1089,6 +1174,7 @@ def read_workbook(
         data = source.read()
     parsers = (
         lambda parser_source: _parse_daily_production_report(parser_source, cutoff_date),
+        _parse_annual_production_report,
         _parse_cumulative_hydrology_report,
         _parse_long_form,
         _parse_year_sheets,
