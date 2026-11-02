@@ -39,6 +39,40 @@ def _plain(value: object) -> str:
     return "".join(char for char in text if unicodedata.category(char) != "Mn").replace("đ", "d")
 
 
+def merge_upload_file_sets(
+    saved: Iterable[tuple[str, bytes]], current: Iterable[tuple[str, bytes]]
+) -> tuple[tuple[str, bytes], ...]:
+    """Keep supporting reports while replacing an older report of the same type.
+
+    Streamlit adds suffixes such as ``(51)`` to downloaded reports. Those files
+    still belong to the same logical report family and the newest upload should
+    replace the older copy. Annual production is ordered last so its finalized
+    monthly totals take precedence over partial daily/monthly reports.
+    """
+
+    def family(name: str) -> str:
+        normalized = re.sub(r"[^a-z0-9]+", "_", _plain(Path(name).stem)).strip("_")
+        if normalized.startswith("bcsx_nam"):
+            return "bcsx_nam"
+        if normalized.startswith("bcsx_thang"):
+            return "bcsx_thang"
+        if normalized.startswith("bctv_luyke"):
+            return "bctv_luyke"
+        return normalized
+
+    merged: dict[str, tuple[str, bytes]] = {}
+    for name, content in (*tuple(saved), *tuple(current)):
+        merged[family(name)] = (name, content)
+
+    priority = {"bcsx_thang": 10, "bctv_luyke": 20, "bcsx_nam": 30}
+    return tuple(
+        item
+        for key, item in sorted(
+            merged.items(), key=lambda pair: (priority.get(pair[0], 0), pair[0])
+        )
+    )
+
+
 def canonical_plant(value: object) -> str | None:
     text = re.sub(r"[^a-z0-9]", "", _plain(value))
     aliases = {
@@ -1239,6 +1273,55 @@ def current_period(df: pd.DataFrame, today: pd.Timestamp | None = None) -> tuple
         return today.year, today.month, True
     latest = df[["year", "month"]].drop_duplicates().sort_values(["year", "month"]).iloc[-1]
     return int(latest["year"]), int(latest["month"]), False
+
+
+def resolve_production_actual_date(
+    actual_as_of: pd.Timestamp | None,
+    monthly_data: pd.DataFrame,
+    daily_production: pd.DataFrame | None,
+    year: int,
+    month: int,
+    today: pd.Timestamp | None = None,
+) -> pd.Timestamp | None:
+    """Resolve the production cutoff independently from hydrology availability.
+
+    A current-month annual production report can contain month-to-date output
+    while the latest complete hydrology date is still in the prior month. Use
+    the latest production day when available. Otherwise, for a non-zero current
+    calendar month total, treat the report as updated through the previous day.
+    """
+    candidate = (
+        pd.Timestamp(actual_as_of).normalize()
+        if actual_as_of is not None and pd.notna(actual_as_of)
+        else None
+    )
+    if daily_production is not None and not daily_production.empty:
+        dates = pd.to_datetime(daily_production["date"], errors="coerce")
+        scope = dates[(dates.dt.year == year) & (dates.dt.month == month)].dropna()
+        if not scope.empty:
+            production_date = pd.Timestamp(scope.max()).normalize()
+            if candidate is None or production_date > candidate:
+                candidate = production_date
+
+    current_day = pd.Timestamp(today or pd.Timestamp.today()).normalize()
+    current_actuals = monthly_data[
+        (monthly_data["year"] == year)
+        & (monthly_data["month"] == month)
+        & pd.to_numeric(monthly_data["production"], errors="coerce").gt(0)
+    ]
+    candidate_in_period = bool(
+        candidate is not None
+        and candidate.year == year
+        and candidate.month == month
+    )
+    if (
+        not candidate_in_period
+        and not current_actuals.empty
+        and (year, month) == (current_day.year, current_day.month)
+        and current_day.day > 1
+    ):
+        candidate = current_day - pd.Timedelta(days=1)
+    return candidate
 
 
 def prepare_analog_comparison_data(

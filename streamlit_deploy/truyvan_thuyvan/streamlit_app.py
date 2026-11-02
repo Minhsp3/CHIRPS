@@ -40,6 +40,7 @@ from data_utils import (
     load_analog_training_workbook,
     merge_current_calendar_month_actuals,
     merge_monthly_actuals,
+    merge_upload_file_sets,
     merge_daily_hydrology,
     monthly_cumulative_production,
     prepare_analog_comparison_data,
@@ -47,6 +48,7 @@ from data_utils import (
     read_cumulative_hydrology_report,
     read_daily_production_workbook,
     read_workbook,
+    resolve_production_actual_date,
     seven_day_inflow_generation_projection,
     update_historical_workbooks,
 )
@@ -343,6 +345,7 @@ with st.sidebar:
         help="Ứng dụng tự nhận dạng bảng dài hoặc workbook có mỗi sheet là một năm.",
     )
     current_uploads = tuple((file.name, file.getvalue()) for file in uploads)
+    combined_uploads = merge_upload_file_sets(saved_uploads, current_uploads)
     save_disabled = not current_uploads or not api_url or not api_key
     if st.button(
         ":material/save: Lưu dữ liệu mới nhất",
@@ -363,7 +366,7 @@ with st.sidebar:
                 monthly_to_save, current_monthly
             )
             result = save_uploads_to_server(
-                api_url, api_key, current_uploads, monthly_to_save
+                api_url, api_key, combined_uploads, monthly_to_save
             )
             st.session_state["upload_refresh_token"] = upload_refresh_token + 1
             st.session_state["saved_upload_notice"] = (
@@ -412,15 +415,11 @@ with st.sidebar:
 uploaded_data = pd.DataFrame()
 uploaded_daily_production = pd.DataFrame(columns=["date", "plant", "production"])
 uploaded_reported_hydrology = pd.DataFrame(columns=["date", "plant", "flow"])
-active_uploads = current_uploads or saved_uploads
+active_uploads = merge_upload_file_sets(saved_uploads, current_uploads)
 if active_uploads:
     uploaded_data, uploaded_daily_production, uploaded_reported_hydrology = load_uploaded_data(
         active_uploads
     )
-if current_uploads and saved_uploads:
-    saved_uploaded_data, _, _ = load_uploaded_data(saved_uploads)
-    uploaded_data = merge_monthly_actuals(saved_uploaded_data, uploaded_data)
-
 if not uploaded_daily_production.empty:
     daily_production = (
         pd.concat([daily_production, uploaded_daily_production], ignore_index=True)
@@ -503,6 +502,9 @@ if data.empty:
     st.stop()
 
 year, month, is_calendar_current = current_period(data)
+data_as_of = resolve_production_actual_date(
+    data_as_of, data, daily_production, year, month
+)
 is_partial_month = bool(
     data_as_of is not None
     and data_as_of.year == year

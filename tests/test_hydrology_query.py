@@ -15,15 +15,93 @@ sys.path.insert(0, str(QUERY_APP_DIR))
 from data_utils import (
     _parse_annual_production_report,
     annual_inflow_projection_table,
+    annual_projection_table,
     load_analog_training_workbook,
     merge_daily_hydrology,
     merge_current_calendar_month_actuals,
     merge_monthly_actuals,
+    merge_upload_file_sets,
+    resolve_production_actual_date,
     seven_day_inflow_generation_projection,
 )
 
 
 class HydrologyQueryTests(unittest.TestCase):
+    def test_current_month_annual_total_uses_previous_day_as_cutoff(self) -> None:
+        monthly = pd.DataFrame(
+            [
+                {
+                    "year": 2026,
+                    "month": 11,
+                    "plant": "Buôn Kuốp",
+                    "production": 2.3,
+                    "flow": None,
+                }
+            ]
+        )
+
+        result = resolve_production_actual_date(
+            pd.Timestamp("2026-10-31"),
+            monthly,
+            pd.DataFrame(columns=["date", "plant", "production"]),
+            2026,
+            11,
+            today=pd.Timestamp("2026-11-02"),
+        )
+
+        self.assertEqual(result, pd.Timestamp("2026-11-01"))
+
+    def test_partial_month_projection_adds_analog_remainder(self) -> None:
+        rows = []
+        for plant in ("Buôn Kuốp", "Buôn Tua Srah", "Srêpốk 3"):
+            for month in range(1, 13):
+                rows.append(
+                    {
+                        "year": 2025,
+                        "month": month,
+                        "plant": plant,
+                        "production": 30.0,
+                        "flow": 100.0,
+                    }
+                )
+            for month in range(1, 12):
+                rows.append(
+                    {
+                        "year": 2026,
+                        "month": month,
+                        "plant": plant,
+                        "production": 3.0 if month == 11 else 30.0,
+                        "flow": 100.0,
+                    }
+                )
+        data = pd.DataFrame(rows)
+
+        result = annual_projection_table(
+            data,
+            2026,
+            11,
+            pd.Timestamp("2026-11-01"),
+            pd.DataFrame(columns=["date", "plant", "production"]),
+        ).set_index("Nhà máy")
+
+        self.assertAlmostEqual(result.at["Buôn Kuốp", "T11"], 32.0)
+
+    def test_new_upload_keeps_other_report_types_and_replaces_same_family(self) -> None:
+        saved = (
+            ("BCSX_Thang (50).xls", b"old-month"),
+            ("BCTV_LUYKE (9).xls", b"hydrology"),
+            ("BCSX_Nam (10).xls", b"old-year"),
+        )
+        current = (("BCSX_Nam (11).xls", b"new-year"),)
+
+        result = merge_upload_file_sets(saved, current)
+
+        self.assertEqual(
+            [name for name, _ in result],
+            ["BCSX_Thang (50).xls", "BCTV_LUYKE (9).xls", "BCSX_Nam (11).xls"],
+        )
+        self.assertEqual(dict(result)["BCSX_Nam (11).xls"], b"new-year")
+
     def test_annual_production_report_uses_gross_mwh_as_monthly_actuals(self) -> None:
         raw = pd.DataFrame([[None] * 26 for _ in range(6)])
         raw.iat[0, 0] = "BÁO CÁO SẢN XUẤT NĂM 2026"
