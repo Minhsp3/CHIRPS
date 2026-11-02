@@ -27,6 +27,12 @@ HISTORICAL_WORKBOOKS = {
     "Srêpốk 3": "Lưu lượng Sản lượng Srepok3 1977_2026.xlsx",
 }
 
+SPECIFIC_WATER_M3_PER_KWH = {
+    "Buôn Kuốp": 4.063,
+    "Buôn Tua Srah": 8.58,
+    "Srêpốk 3": 6.74,
+}
+
 
 def _plain(value: object) -> str:
     text = unicodedata.normalize("NFD", str(value).strip().lower())
@@ -424,6 +430,231 @@ def load_daily_folders(folder: str | Path) -> tuple[pd.DataFrame, pd.DataFrame]:
         else pd.DataFrame(columns=["date", "plant", "flow"])
     )
     return production, hydrology
+
+
+def merge_daily_hydrology(
+    fallback: pd.DataFrame, preferred: pd.DataFrame
+) -> pd.DataFrame:
+    """Merge daily inflow series, preferring valid values from the newer source."""
+    columns = ["date", "plant", "flow"]
+    frames: list[pd.DataFrame] = []
+    for priority, source in enumerate((fallback, preferred)):
+        if source is None or source.empty:
+            continue
+        frame = source.reindex(columns=columns).copy()
+        frame["date"] = pd.to_datetime(frame["date"], errors="coerce").dt.normalize()
+        frame["plant"] = frame["plant"].map(canonical_plant)
+        frame["flow"] = pd.to_numeric(frame["flow"], errors="coerce")
+        frame = frame.dropna(subset=columns)
+        frame["_priority"] = priority
+        frames.append(frame)
+    if not frames:
+        return pd.DataFrame(columns=columns)
+    return (
+        pd.concat(frames, ignore_index=True)
+        .sort_values(["date", "plant", "_priority"])
+        .drop_duplicates(["date", "plant"], keep="last")
+        .drop(columns="_priority")
+        .sort_values(["date", "plant"])
+        .reset_index(drop=True)
+    )
+
+
+def merge_monthly_actuals(
+    fallback: pd.DataFrame, preferred: pd.DataFrame
+) -> pd.DataFrame:
+    """Overlay newer monthly actuals without replacing valid fields with nulls."""
+    keys = ["year", "month", "plant"]
+    values = ["production", "flow"]
+
+    def normalized(source: pd.DataFrame | None) -> pd.DataFrame:
+        if source is None or source.empty:
+            return pd.DataFrame(columns=keys + values).set_index(keys)
+        frame = source.reindex(columns=keys + values).copy()
+        frame["year"] = pd.to_numeric(frame["year"], errors="coerce")
+        frame["month"] = pd.to_numeric(frame["month"], errors="coerce")
+        frame["plant"] = frame["plant"].map(canonical_plant)
+        for column in values:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        frame = frame.dropna(subset=keys)
+        frame = frame[frame["month"].between(1, 12)]
+        frame[["year", "month"]] = frame[["year", "month"]].astype(int)
+
+        def last_valid(series: pd.Series) -> float:
+            valid = series.dropna()
+            return float(valid.iloc[-1]) if not valid.empty else np.nan
+
+        return frame.groupby(keys, sort=False)[values].agg(last_valid)
+
+    base = normalized(fallback)
+    newer = normalized(preferred)
+    combined = base.combine_first(newer)
+    combined.update(newer)
+    if combined.empty:
+        return pd.DataFrame(columns=keys + values)
+    return combined.reset_index().sort_values(keys).reset_index(drop=True)
+
+
+def merge_current_calendar_month_actuals(
+    monthly_data: pd.DataFrame,
+    daily_actuals: pd.DataFrame,
+    actual_as_of: pd.Timestamp | None,
+    today: pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    """Apply partial daily totals only to the calendar month still in progress.
+
+    A delayed hydrology cutoff from a completed month must not replace the
+    finalized monthly values already read from the production workbook.
+    """
+    if actual_as_of is None or daily_actuals is None or daily_actuals.empty:
+        return monthly_data.copy()
+    cutoff = pd.Timestamp(actual_as_of).normalize()
+    current_day = pd.Timestamp(today or pd.Timestamp.today()).normalize()
+    if (cutoff.year, cutoff.month) != (current_day.year, current_day.month):
+        return monthly_data.copy()
+    return merge_monthly_actuals(monthly_data, daily_actuals)
+
+
+def seven_day_inflow_generation_projection(
+    daily_hydrology: pd.DataFrame,
+    actual_as_of: pd.Timestamp,
+    reservoir_status: pd.DataFrame | None = None,
+    end_date: pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    """Estimate remaining generation from seven-day mean inflow.
+
+    Daily generation in million kWh is Q * 86,400 / specific water / 1,000,000.
+    During Buôn Tua Srah filling, 40 m3/s is used until the level is less than
+    one metre below MNDBT; once near full, all mean inflow is treated as turbine
+    flow.
+    """
+    columns = [
+        "Nhà máy",
+        "Từ ngày",
+        "Đến ngày",
+        "Q TB 7 ngày",
+        "Nước về ngày",
+        "Mực nước",
+        "MNDBT",
+        "Chênh MNDBT",
+        "Q tính sản lượng",
+        "Suất hao nước",
+        "Sản lượng ngày",
+        "Chế độ tính",
+        "Số ngày còn lại",
+        "Sản lượng còn lại",
+    ]
+    if daily_hydrology.empty or actual_as_of is None:
+        return pd.DataFrame(columns=columns)
+
+    actual_as_of = pd.Timestamp(actual_as_of).normalize()
+    forecast_end = (
+        pd.Timestamp(end_date).normalize()
+        if end_date is not None
+        else pd.Timestamp(year=actual_as_of.year, month=12, day=31)
+    )
+    window_start = actual_as_of - pd.Timedelta(days=6)
+    status = reservoir_status.copy() if reservoir_status is not None else pd.DataFrame()
+    if not status.empty:
+        status["date"] = pd.to_datetime(status["date"], errors="coerce").dt.normalize()
+        status = status[status["date"] <= actual_as_of].sort_values("date")
+
+    rows: list[dict[str, object]] = []
+    for plant in PLANTS:
+        source = daily_hydrology[
+            (daily_hydrology["plant"] == plant)
+            & (daily_hydrology["date"] >= window_start)
+            & (daily_hydrology["date"] <= actual_as_of)
+        ]
+        mean_inflow = pd.to_numeric(source["flow"], errors="coerce").mean()
+        if pd.isna(mean_inflow):
+            continue
+
+        water_level = np.nan
+        mndbt = np.nan
+        gap = np.nan
+        if not status.empty:
+            plant_status = status[status["plant"] == plant]
+            if not plant_status.empty:
+                latest = plant_status.iloc[-1]
+                water_level = pd.to_numeric(latest.get("water_level"), errors="coerce")
+                mndbt = pd.to_numeric(latest.get("mndbt"), errors="coerce")
+                if pd.notna(water_level) and pd.notna(mndbt):
+                    gap = float(mndbt) - float(water_level)
+
+        generation_flow = float(mean_inflow)
+        mode = "Toàn bộ lưu lượng về"
+        if plant == "Buôn Tua Srah":
+            if pd.notna(gap) and float(gap) < 1.0:
+                mode = "BTS gần đầy: Q chạy máy = Q về"
+            elif pd.notna(gap):
+                generation_flow = 40.0
+                mode = "BTS tích nước: Q chạy máy tối thiểu 40 m³/s"
+            else:
+                mode = "BTS thiếu mực nước: tạm lấy Q về"
+
+        specific_water = SPECIFIC_WATER_M3_PER_KWH[plant]
+        daily_generation = generation_flow * 86_400 / specific_water / 1_000_000
+        remaining_days = max((forecast_end - actual_as_of).days, 0)
+        rows.append(
+            {
+                "Nhà máy": plant,
+                "Từ ngày": window_start,
+                "Đến ngày": actual_as_of,
+                "Q TB 7 ngày": float(mean_inflow),
+                "Nước về ngày": float(mean_inflow) * 86_400 / 1_000_000,
+                "Mực nước": water_level,
+                "MNDBT": mndbt,
+                "Chênh MNDBT": gap,
+                "Q tính sản lượng": generation_flow,
+                "Suất hao nước": specific_water,
+                "Sản lượng ngày": daily_generation,
+                "Chế độ tính": mode,
+                "Số ngày còn lại": remaining_days,
+                "Sản lượng còn lại": daily_generation * remaining_days,
+            }
+        )
+    return pd.DataFrame(rows, columns=columns)
+
+
+def annual_inflow_projection_table(
+    df: pd.DataFrame,
+    current_year: int,
+    cutoff_month: int,
+    actual_as_of: pd.Timestamp,
+    inflow_projection: pd.DataFrame,
+) -> pd.DataFrame:
+    """Build a monthly annual projection using constant seven-day inflow output."""
+    columns = ["Nhà máy", "Năm quy luật", *[f"T{month}" for month in range(1, 13)], "Tổng năm"]
+    actual_as_of = pd.Timestamp(actual_as_of).normalize()
+    daily_by_plant = inflow_projection.set_index("Nhà máy")["Sản lượng ngày"]
+    rows: list[dict[str, object]] = []
+    for plant in PLANTS:
+        current = df[(df["year"] == current_year) & (df["plant"] == plant)].set_index("month")["production"]
+        daily_value = daily_by_plant.get(plant, np.nan)
+        row: dict[str, object] = {"Nhà máy": plant, "Năm quy luật": None}
+        values: list[float] = []
+        for projection_month in range(1, 13):
+            if projection_month < cutoff_month:
+                value = current.get(projection_month, np.nan)
+            elif projection_month == cutoff_month:
+                actual_value = current.get(projection_month, np.nan)
+                remaining_days = actual_as_of.days_in_month - actual_as_of.day
+                value = float(actual_value) + float(daily_value) * remaining_days if pd.notna(actual_value) and pd.notna(daily_value) else np.nan
+            else:
+                days = pd.Period(f"{current_year}-{projection_month:02d}", freq="M").days_in_month
+                value = float(daily_value) * days if pd.notna(daily_value) else np.nan
+            numeric = float(value) if pd.notna(value) else np.nan
+            row[f"T{projection_month}"] = numeric
+            values.append(numeric)
+        row["Tổng năm"] = float(np.nansum(values)) if any(np.isfinite(value) for value in values) else np.nan
+        rows.append(row)
+    result = pd.DataFrame(rows, columns=columns)
+    total = {"Nhà máy": "Tổng cộng", "Năm quy luật": None}
+    for column in [f"T{month}" for month in range(1, 13)]:
+        total[column] = result[column].sum(min_count=1)
+    total["Tổng năm"] = result["Tổng năm"].sum(min_count=1)
+    return pd.concat([result, pd.DataFrame([total], columns=columns)], ignore_index=True)
 
 
 def load_current_hydrology_reports(folder: str | Path) -> pd.DataFrame:
@@ -1083,14 +1314,20 @@ def analog_similarity_series(
 
     Production and flow are each divided by the current year's mean for the
     selected period, then averaged. An index of 100 therefore represents the
-    current year's average combined production/flow level.
+    current year's average combined production/flow level. The current year is
+    shown through ``cutoff_month`` while the historical year is shown through
+    December when those values are available. Future historical months are for
+    visual reference only and do not affect the similarity ranking.
     """
     scope = df[
         (df["plant"] == plant)
         & (df["year"].isin([current_year, analog_year]))
-        & (df["month"].between(1, cutoff_month))
+        & (df["month"].between(1, 12))
     ]
-    current = scope[scope["year"] == current_year].set_index("month")
+    current = scope[
+        (scope["year"] == current_year)
+        & (scope["month"].between(1, cutoff_month))
+    ].set_index("month")
     if current.empty:
         return pd.DataFrame(columns=["Tháng", "Năm", "Chỉ số tương đồng"])
 
@@ -1102,7 +1339,8 @@ def analog_similarity_series(
     rows: list[dict[str, object]] = []
     for comparison_year in (current_year, analog_year):
         yearly = scope[scope["year"] == comparison_year].set_index("month")
-        for series_month in range(1, cutoff_month + 1):
+        final_month = cutoff_month if comparison_year == current_year else 12
+        for series_month in range(1, final_month + 1):
             if series_month not in yearly.index:
                 continue
             normalized = [
@@ -1119,6 +1357,141 @@ def analog_similarity_series(
                     }
                 )
     return pd.DataFrame(rows)
+
+
+def daily_analog_similarity_series(
+    daily_production: pd.DataFrame,
+    daily_hydrology: pd.DataFrame,
+    current_year: int,
+    selected_month: int,
+    plant: str,
+    analog_year: int,
+    actual_as_of: pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    """Build daily actual, analog-year, and future-pattern comparison series.
+
+    Historical analog days are always returned as a solid reference series.
+    Current-year observations are solid; missing future days are copied from
+    the same calendar days of the analog year and marked as forecast so the UI
+    can draw them with a dashed stroke.
+    """
+    columns = [
+        "Ngày",
+        "Năm",
+        "Chuỗi",
+        "Trạng thái",
+        "Chỉ số tương đồng",
+        "Sản lượng",
+        "Lưu lượng",
+    ]
+    if daily_production.empty and daily_hydrology.empty:
+        return pd.DataFrame(columns=columns)
+
+    production = daily_production[
+        (daily_production["plant"] == plant)
+        & (daily_production["date"].dt.month == selected_month)
+        & (daily_production["date"].dt.year.isin([current_year, analog_year]))
+    ][["date", "production"]]
+    hydrology = daily_hydrology[
+        (daily_hydrology["plant"] == plant)
+        & (daily_hydrology["date"].dt.month == selected_month)
+        & (daily_hydrology["date"].dt.year.isin([current_year, analog_year]))
+    ][["date", "flow"]]
+    daily = production.merge(hydrology, on="date", how="outer").sort_values("date")
+    if daily.empty:
+        return pd.DataFrame(columns=columns)
+
+    daily = daily.assign(
+        year=daily["date"].dt.year,
+        day=daily["date"].dt.day,
+    )
+    analog = daily[daily["year"] == analog_year].copy()
+    current = daily[daily["year"] == current_year].copy()
+    if analog.empty:
+        return pd.DataFrame(columns=columns)
+
+    cutoff_day = 0
+    if actual_as_of is not None:
+        actual_as_of = pd.Timestamp(actual_as_of).normalize()
+        if actual_as_of.year == current_year:
+            if selected_month < actual_as_of.month:
+                cutoff_day = int(current["day"].max()) if not current.empty else 0
+            elif selected_month == actual_as_of.month:
+                cutoff_day = actual_as_of.day
+    current_actual = current[current["day"] <= cutoff_day].copy()
+
+    scales: dict[str, float] = {}
+    for metric in ("production", "flow"):
+        source = current_actual[metric].dropna()
+        if source.empty:
+            source = analog[metric].dropna()
+        if not source.empty:
+            scales[metric] = max(float(source.abs().mean()), 1e-9)
+    if not scales:
+        return pd.DataFrame(columns=columns)
+
+    def append_rows(
+        frame: pd.DataFrame,
+        display_year: int,
+        series_name: str,
+        status: str,
+        output: list[dict[str, object]],
+    ) -> None:
+        for _, daily_row in frame.sort_values("day").iterrows():
+            normalized = [
+                float(daily_row[metric]) / scale * 100
+                for metric, scale in scales.items()
+                if pd.notna(daily_row[metric])
+            ]
+            if not normalized:
+                continue
+            output.append(
+                {
+                    "Ngày": int(daily_row["day"]),
+                    "Năm": str(display_year),
+                    "Chuỗi": series_name,
+                    "Trạng thái": status,
+                    "Chỉ số tương đồng": float(np.mean(normalized)),
+                    "Sản lượng": daily_row.get("production", np.nan),
+                    "Lưu lượng": daily_row.get("flow", np.nan),
+                }
+            )
+
+    rows: list[dict[str, object]] = []
+    append_rows(
+        analog,
+        analog_year,
+        f"Năm tương đồng {analog_year}",
+        "Quá khứ",
+        rows,
+    )
+    append_rows(
+        current_actual,
+        current_year,
+        f"Năm hiện tại {current_year}",
+        "Thực tế",
+        rows,
+    )
+
+    forecast = analog[analog["day"] > cutoff_day].copy()
+    if not current_actual.empty and not forecast.empty:
+        bridge_day = int(current_actual["day"].max())
+        bridge = current_actual[current_actual["day"] == bridge_day]
+        append_rows(
+            bridge,
+            current_year,
+            f"Năm hiện tại {current_year}",
+            "Dự kiến",
+            rows,
+        )
+    append_rows(
+        forecast,
+        current_year,
+        f"Năm hiện tại {current_year}",
+        "Dự kiến",
+        rows,
+    )
+    return pd.DataFrame(rows, columns=columns)
 
 
 def annual_projection_table(

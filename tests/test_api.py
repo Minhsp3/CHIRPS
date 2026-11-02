@@ -169,6 +169,39 @@ class ApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 422)
 
+    def test_monthly_actuals_are_merged_across_new_upload_batches(self) -> None:
+        def upload(name: str, records: list[dict]) -> None:
+            response = self.client.post(
+                "/hydrology-uploads",
+                headers=self.headers,
+                json={
+                    "files": [{
+                        "name": name,
+                        "content_base64": base64.b64encode(b"excel").decode("ascii"),
+                    }],
+                    "monthly_actuals": records,
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+
+        upload("thang-10.xlsx", [{
+            "year": 2026, "month": 10, "plant": "Buôn Kuốp",
+            "production": 176.538, "flow": 90.0,
+        }])
+        upload("thang-11.xlsx", [{
+            "year": 2026, "month": 11, "plant": "Buôn Kuốp",
+            "production": 12.0, "flow": 100.0,
+        }])
+
+        response = self.client.get("/hydrology-uploads", headers=self.headers)
+        self.assertEqual(response.status_code, 200)
+        actuals = {
+            (row["year"], row["month"], row["plant"]): row
+            for row in response.json()["monthly_actuals"]
+        }
+        self.assertEqual(actuals[(2026, 10, "Buôn Kuốp")]["production"], 176.538)
+        self.assertEqual(actuals[(2026, 11, "Buôn Kuốp")]["production"], 12.0)
+
     def test_history_filters_and_aggregates(self) -> None:
         response = self.client.get(
             "/history",

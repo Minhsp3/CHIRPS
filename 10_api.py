@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import secrets
 import sqlite3
@@ -24,6 +25,7 @@ MAX_RANGE_DAYS = int(os.getenv("HYDROAI_API_MAX_RANGE_DAYS", "4000"))
 MAX_UPLOAD_FILE_BYTES = int(os.getenv("HYDROAI_MAX_UPLOAD_FILE_BYTES", str(25 * 1024 * 1024)))
 MAX_UPLOAD_BATCH_BYTES = int(os.getenv("HYDROAI_MAX_UPLOAD_BATCH_BYTES", str(50 * 1024 * 1024)))
 ALLOWED_UPLOAD_SUFFIXES = {".xls", ".xlsx", ".xlsm"}
+MONTHLY_ACTUAL_PLANTS = {"Buôn Kuốp", "Buôn Tua Srah", "Srêpốk 3"}
 RESERVOIR_BY_BASIN = {
     "BTS": "Buôn Tua Srah",
     "BK": "Buôn Kuốp",
@@ -55,10 +57,75 @@ def safe_upload_name(raw_name: str) -> str:
     return f"{stem[:160]}{suffix}"
 
 
+def validated_monthly_actuals(raw_records: Any) -> list[dict[str, Any]]:
+    if raw_records is None:
+        return []
+    if not isinstance(raw_records, list) or len(raw_records) > 2_000:
+        raise ValueError("Dữ liệu thực tế theo tháng không hợp lệ")
+    records: list[dict[str, Any]] = []
+    for item in raw_records:
+        if not isinstance(item, dict):
+            raise ValueError("Dữ liệu thực tế theo tháng không hợp lệ")
+        try:
+            year = int(item.get("year"))
+            month = int(item.get("month"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Năm hoặc tháng của dữ liệu thực tế không hợp lệ") from exc
+        plant = str(item.get("plant", "")).strip()
+        if not 1900 <= year <= 2200 or not 1 <= month <= 12:
+            raise ValueError("Năm hoặc tháng của dữ liệu thực tế không hợp lệ")
+        if plant not in MONTHLY_ACTUAL_PLANTS:
+            raise ValueError(f"Nhà máy không hợp lệ: {plant}")
+        record: dict[str, Any] = {"year": year, "month": month, "plant": plant}
+        for field in ("production", "flow"):
+            value = item.get(field)
+            if value is None:
+                record[field] = None
+                continue
+            try:
+                number = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Giá trị {field} không hợp lệ") from exc
+            if not math.isfinite(number):
+                raise ValueError(f"Giá trị {field} không hợp lệ")
+            record[field] = number
+        records.append(record)
+    return records
+
+
+def merge_saved_monthly_actuals(
+    root: Path, new_records: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    path = root / "monthly_actuals.json"
+    existing: list[dict[str, Any]] = []
+    if path.is_file():
+        existing = validated_monthly_actuals(json.loads(path.read_text(encoding="utf-8")))
+    merged = {
+        (item["year"], item["month"], item["plant"]): dict(item)
+        for item in existing
+    }
+    for item in new_records:
+        key = (item["year"], item["month"], item["plant"])
+        target = merged.setdefault(
+            key,
+            {"year": item["year"], "month": item["month"], "plant": item["plant"],
+             "production": None, "flow": None},
+        )
+        for field in ("production", "flow"):
+            if item.get(field) is not None:
+                target[field] = item[field]
+    result = [merged[key] for key in sorted(merged)]
+    temporary = root / ".monthly_actuals.json.tmp"
+    temporary.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
+    return result
+
+
 def save_hydrology_uploads(payload: dict[str, Any]) -> dict[str, Any]:
     raw_files = payload.get("files")
     if not isinstance(raw_files, list) or not 1 <= len(raw_files) <= 20:
         raise ValueError("Cần chọn từ 1 đến 20 tệp Excel")
+    monthly_actuals = validated_monthly_actuals(payload.get("monthly_actuals"))
     decoded: list[tuple[str, bytes]] = []
     total_bytes = 0
     used_names: set[str] = set()
@@ -106,6 +173,7 @@ def save_hydrology_uploads(payload: dict[str, Any]) -> dict[str, Any]:
     temporary_manifest = root / f".{batch_id}.json.tmp"
     temporary_manifest.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary_manifest.replace(manifest_path)
+    manifest["monthly_actuals"] = merge_saved_monthly_actuals(root, monthly_actuals)
     return manifest
 
 
@@ -113,7 +181,7 @@ def load_hydrology_uploads() -> dict[str, Any]:
     root = hydrology_upload_dir()
     manifest_path = root / "current.json"
     if not manifest_path.is_file():
-        return {"batch_id": None, "saved_at": None, "files": []}
+        return {"batch_id": None, "saved_at": None, "files": [], "monthly_actuals": []}
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     batch_id = str(manifest.get("batch_id", ""))
     if not re.fullmatch(r"[0-9TZ-]+[0-9a-f]{8}", batch_id):
@@ -133,10 +201,17 @@ def load_hydrology_uploads() -> dict[str, Any]:
                 "content_base64": base64.b64encode(content).decode("ascii"),
             }
         )
+    monthly_path = root / "monthly_actuals.json"
+    monthly_actuals = (
+        validated_monthly_actuals(json.loads(monthly_path.read_text(encoding="utf-8")))
+        if monthly_path.is_file()
+        else []
+    )
     return {
         "batch_id": batch_id,
         "saved_at": manifest.get("saved_at"),
         "files": files,
+        "monthly_actuals": monthly_actuals,
     }
 
 

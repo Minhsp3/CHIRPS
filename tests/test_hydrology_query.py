@@ -1,0 +1,179 @@
+from __future__ import annotations
+
+import sys
+import unittest
+from pathlib import Path
+
+import pandas as pd
+
+
+ROOT = Path(__file__).resolve().parents[1]
+QUERY_APP_DIR = ROOT / "streamlit_deploy" / "truyvan_thuyvan"
+sys.path.insert(0, str(QUERY_APP_DIR))
+
+from data_utils import (
+    annual_inflow_projection_table,
+    merge_daily_hydrology,
+    merge_current_calendar_month_actuals,
+    merge_monthly_actuals,
+    seven_day_inflow_generation_projection,
+)
+
+
+class HydrologyQueryTests(unittest.TestCase):
+    def test_new_monthly_actual_overrides_stale_value_and_keeps_old_months(self) -> None:
+        history = pd.DataFrame(
+            [
+                {"year": 2026, "month": 9, "plant": "Buôn Kuốp", "production": 120.0, "flow": 80.0},
+                {"year": 2026, "month": 10, "plant": "Buôn Kuốp", "production": 135.678, "flow": 90.0},
+            ]
+        )
+        uploaded = pd.DataFrame(
+            [
+                {"year": 2026, "month": 10, "plant": "Buon Kuop", "production": 176.538, "flow": None},
+                {"year": 2026, "month": 11, "plant": "Buôn Kuốp", "production": 12.0, "flow": 100.0},
+            ]
+        )
+
+        result = merge_monthly_actuals(history, uploaded).set_index(["year", "month", "plant"])
+
+        self.assertEqual(result.at[(2026, 9, "Buôn Kuốp"), "production"], 120.0)
+        self.assertEqual(result.at[(2026, 10, "Buôn Kuốp"), "production"], 176.538)
+        self.assertEqual(result.at[(2026, 10, "Buôn Kuốp"), "flow"], 90.0)
+        self.assertEqual(result.at[(2026, 11, "Buôn Kuốp"), "production"], 12.0)
+
+    def test_completed_month_is_not_replaced_by_partial_daily_total(self) -> None:
+        monthly = pd.DataFrame([
+            {"year": 2026, "month": 10, "plant": "Buôn Kuốp", "production": 176.538, "flow": 90.0},
+        ])
+        partial = pd.DataFrame([
+            {"year": 2026, "month": 10, "plant": "Buôn Kuốp", "production": 159.9, "flow": 88.0},
+        ])
+
+        result = merge_current_calendar_month_actuals(
+            monthly,
+            partial,
+            pd.Timestamp("2026-10-26"),
+            today=pd.Timestamp("2026-11-02"),
+        ).set_index(["year", "month", "plant"])
+
+        self.assertEqual(result.at[(2026, 10, "Buôn Kuốp"), "production"], 176.538)
+        self.assertEqual(result.at[(2026, 10, "Buôn Kuốp"), "flow"], 90.0)
+
+    def test_partial_daily_total_updates_current_calendar_month(self) -> None:
+        monthly = pd.DataFrame([
+            {"year": 2026, "month": 11, "plant": "Buôn Kuốp", "production": 20.0, "flow": 90.0},
+        ])
+        partial = pd.DataFrame([
+            {"year": 2026, "month": 11, "plant": "Buôn Kuốp", "production": 25.0, "flow": 95.0},
+        ])
+
+        result = merge_current_calendar_month_actuals(
+            monthly,
+            partial,
+            pd.Timestamp("2026-11-02"),
+            today=pd.Timestamp("2026-11-02"),
+        ).set_index(["year", "month", "plant"])
+
+        self.assertEqual(result.at[(2026, 11, "Buôn Kuốp"), "production"], 25.0)
+        self.assertEqual(result.at[(2026, 11, "Buôn Kuốp"), "flow"], 95.0)
+
+    def test_api_values_override_excel_and_keep_old_fallback(self) -> None:
+        excel = pd.DataFrame(
+            [
+                {"date": "2026-09-30", "plant": "Buôn Kuốp", "flow": 90.0},
+                {"date": "2026-10-01", "plant": "Buôn Kuốp", "flow": 100.0},
+            ]
+        )
+        api = pd.DataFrame(
+            [
+                {"date": "2026-10-01", "plant": "Buon Kuop", "flow": 110.0},
+                {"date": "2026-10-02", "plant": "Buôn Kuốp", "flow": 120.0},
+                {"date": "2026-10-03", "plant": "Buôn Kuốp", "flow": None},
+            ]
+        )
+
+        result = merge_daily_hydrology(excel, api).set_index("date")
+
+        self.assertEqual(result.loc[pd.Timestamp("2026-09-30"), "flow"], 90.0)
+        self.assertEqual(result.loc[pd.Timestamp("2026-10-01"), "flow"], 110.0)
+        self.assertEqual(result.loc[pd.Timestamp("2026-10-02"), "flow"], 120.0)
+        self.assertNotIn(pd.Timestamp("2026-10-03"), result.index)
+
+    def test_seven_day_projection_applies_bts_filling_rule(self) -> None:
+        dates = pd.date_range("2026-10-20", "2026-10-26")
+        flows = {"Buôn Kuốp": 100.0, "Buôn Tua Srah": 120.0, "Srêpốk 3": 80.0}
+        daily = pd.DataFrame(
+            [
+                {"date": date, "plant": plant, "flow": flow}
+                for date in dates
+                for plant, flow in flows.items()
+            ]
+        )
+        status = pd.DataFrame(
+            [
+                {
+                    "date": "2026-10-26",
+                    "plant": "Buôn Tua Srah",
+                    "water_level": 485.0,
+                    "mndbt": 487.5,
+                }
+            ]
+        )
+
+        result = seven_day_inflow_generation_projection(
+            daily, pd.Timestamp("2026-10-26"), status
+        ).set_index("Nhà máy")
+
+        self.assertEqual(result.at["Buôn Tua Srah", "Q TB 7 ngày"], 120.0)
+        self.assertEqual(result.at["Buôn Tua Srah", "Q tính sản lượng"], 40.0)
+        self.assertAlmostEqual(
+            result.at["Buôn Kuốp", "Nước về ngày"], 8.64
+        )
+        self.assertAlmostEqual(
+            result.at["Buôn Kuốp", "Sản lượng ngày"],
+            100.0 * 86_400 / 4.063 / 1_000_000,
+        )
+        self.assertEqual(result.at["Buôn Kuốp", "Số ngày còn lại"], 66)
+
+    def test_bts_near_full_uses_all_mean_inflow(self) -> None:
+        daily = pd.DataFrame(
+            [
+                {"date": date, "plant": "Buôn Tua Srah", "flow": 120.0}
+                for date in pd.date_range("2026-10-20", "2026-10-26")
+            ]
+        )
+        status = pd.DataFrame(
+            [{"date": "2026-10-26", "plant": "Buôn Tua Srah", "water_level": 486.8, "mndbt": 487.5}]
+        )
+
+        result = seven_day_inflow_generation_projection(
+            daily, pd.Timestamp("2026-10-26"), status
+        ).iloc[0]
+
+        self.assertEqual(result["Q tính sản lượng"], 120.0)
+        self.assertIn("gần đầy", result["Chế độ tính"])
+
+    def test_annual_inflow_projection_uses_remaining_calendar_days(self) -> None:
+        data = pd.DataFrame(
+            [
+                {"year": 2026, "month": month, "plant": plant, "production": 10.0, "flow": 1.0}
+                for plant in ("Buôn Kuốp", "Buôn Tua Srah", "Srêpốk 3")
+                for month in range(1, 11)
+            ]
+        )
+        inflow = pd.DataFrame(
+            [{"Nhà máy": plant, "Sản lượng ngày": 2.0} for plant in ("Buôn Kuốp", "Buôn Tua Srah", "Srêpốk 3")]
+        )
+
+        result = annual_inflow_projection_table(
+            data, 2026, 10, pd.Timestamp("2026-10-26"), inflow
+        ).set_index("Nhà máy")
+
+        self.assertEqual(result.at["Buôn Kuốp", "T10"], 20.0)
+        self.assertEqual(result.at["Buôn Kuốp", "T11"], 60.0)
+        self.assertEqual(result.at["Buôn Kuốp", "T12"], 62.0)
+
+
+if __name__ == "__main__":
+    unittest.main()
